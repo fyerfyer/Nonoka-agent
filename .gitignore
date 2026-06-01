@@ -1,0 +1,37 @@
+# Docs & Old implementations
+prev-implementation/ 
+design/
+
+# Virtual Environments
+.venv/
+venv/
+env/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build & Packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+uv.lock
+
+# Environment Variables (Secrets)
+.env
+.env.*
+!.env.example
+
+# IDE & Tools
+.claude/
+.vscode/
+.idea/
+.mypy_cache/
+.ruff_cache/
