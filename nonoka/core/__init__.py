@@ -1,6 +1,7 @@
 from .tool import tool
-from .types import Capability, RunContext, RetryPolicy
+from .types import Capability, RetryPolicy
 from .registry import ToolRegistry
+from .context import RunContext
 
 __all__ = [
   "tool",
@@ -8,4 +9,5 @@ __all__ = [
   "RunContext",
   "RetryPolicy",
   "ToolRegistry",
+  "RunContext"
 ]

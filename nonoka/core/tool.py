@@ -6,7 +6,8 @@ from typing import Any, get_type_hints
 
 from pydantic import TypeAdapter, create_model
 
-from nonoka.core.types import Capability, RetryPolicy, RunContext
+from nonoka.core.types import Capability, RetryPolicy
+from nonoka.core.context import RunContext
 
 class Tool(Capability):
   """
