@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -25,20 +25,13 @@ class EventType(str, Enum):
 
 class AgentEvent(BaseModel):
   """
-  Framework-issued structured observability event.
-  All telemetry data and run logs are distributed based on this structure.
+  Structured observability event schema.
+
+  This is a pure data model used by structlog (not an event-bus).
+  Call-sites construct an ``AgentEvent`` and pass it to
+  ``structlog.get_logger("nonoka").info(..., agent_event=event)``.
   """
   type: EventType | str
   session_id: str
   timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
   data: dict[str, Any] = Field(default_factory=dict)
-
-
-@runtime_checkable
-class ObservabilityBackend(Protocol):
-  """
-  Event consumption protocol.
-  Used for observability.
-  """
-  async def on_event(self, event: AgentEvent) -> None:
-    ...

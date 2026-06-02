@@ -1,38 +1,38 @@
 import pytest
-import logging
-from nonoka.backends.observability.logging import StructuredLoggingBackend
 from nonoka.core.event import AgentEvent, EventType
+from nonoka.core.context import RunContext
+from nonoka.core.session import Session
+from nonoka.core.agent import Agent
 
 
 @pytest.mark.asyncio
-async def test_structured_logging_backend(caplog):
-  """Test that observability events are correctly routed to standard logging"""
-  caplog.set_level(logging.INFO)
+async def test_run_context_emit_structlog(capsys):
+    """RunContext.emit() should log via structlog to stdout."""
+    agent = Agent(model="test")
+    session = Session(session_id="sess-1", agent=agent, deps=None)
+    ctx = RunContext(session)
 
-  backend = StructuredLoggingBackend(logger_name="test.logger")
+    event = AgentEvent(
+        type=EventType.SESSION_STARTED,
+        session_id="sess-1",
+        data={"agent_id": "test-agent"}
+    )
+    ctx.emit(event)
 
-  # 1. Test Info level event
-  event1 = AgentEvent(
-    type=EventType.SESSION_STARTED,
-    session_id="sess-1",
-    data={"agent_id": "test-agent"}
-  )
-  await backend.on_event(event1)
+    captured = capsys.readouterr()
+    assert "session.started" in captured.out
+    assert "sess-1" in captured.out
 
-  assert "session.started" in caplog.text
-  assert "sess-1" in caplog.text
 
-  # 2. Test Error level event
-  caplog.clear()
-  event2 = AgentEvent(
-    type=EventType.STEP_FAILED,
-    session_id="sess-2",
-    data={"error": "Tool execution failed"}
-  )
-  await backend.on_event(event2)
+@pytest.mark.asyncio
+async def test_run_context_checkpoint_request(capsys):
+    """RunContext.checkpoint() should emit a checkpoint request event."""
+    agent = Agent(model="test")
+    session = Session(session_id="sess-2", agent=agent, deps=None)
+    ctx = RunContext(session)
 
-  # Verify it was logged as ERROR
-  error_records = [record for record in caplog.records if record.levelname == 'ERROR']
-  assert len(error_records) == 1
-  assert "step.failed" in error_records[0].message
-  assert "sess-2" in error_records[0].message
+    await ctx.checkpoint(label="mid-flow")
+
+    captured = capsys.readouterr()
+    assert "checkpoint.requested" in captured.out
+    assert "sess-2" in captured.out

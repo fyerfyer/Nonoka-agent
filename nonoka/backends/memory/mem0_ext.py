@@ -1,9 +1,9 @@
 from typing import Any
-import logging
 
+from nonoka.core.logger import get_logger
 from nonoka.core.memory import MemoryBackend, MemoryEntry, MemoryRole
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 try:
   import mem0

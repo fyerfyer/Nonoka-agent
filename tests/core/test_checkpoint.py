@@ -1,5 +1,5 @@
 import pytest
-from nonoka.core.checkpoint import SessionState, SessionStatus, StepResult, StepError
+from nonoka.core.session import SessionState, SessionStatus, StepResult, StepFailure
 from nonoka.core.plan import Plan, Step
 
 

@@ -1,11 +1,8 @@
-from nonoka.core.checkpoint import CheckpointStore
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar, Any
-from collections.abc import Callable
+from typing import Generic, TypeVar
 
-from nonoka.core.types import Capability, RetryPolicy
-from nonoka.core.tool import tool as make_tool
-from nonoka.core.registry import ToolRegistry
+from nonoka.core.plan import Plan
+from nonoka.core.types import Capability, RetryPolicy, RunResult
 
 DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
@@ -14,12 +11,23 @@ ResultT = TypeVar("ResultT")
 @dataclass(frozen=True)
 class Agent(Generic[DepsT, ResultT]):
   """
-  Agent is a state-less configuration object that holds the model, tools, and skills.
-  Runtime state should be stored in Session.
+  Agent is a state-less, immutable configuration object.
+
+  It holds the model, tools, and execution policy.  Runtime state
+  (plan progress, checkpoint, memory) lives in ``Session``.
+
+  Usage:
+
+    from nonoka import Agent, tool
+
+    @tool
+    async def get_weather(city: str) -> dict: ...
+
+    agent = Agent(model="gpt-4o", tools=[get_weather])
+    result = await agent.run("What's the weather in Beijing?")
   """
   model: str
   tools: list[Capability] = field(default_factory=list)
-  skills: list[Capability] = field(default_factory=list)  # TODO: implement Skill Protocol
   system_prompt: str = ""
 
   # Generic type hints for runtime type inference
@@ -32,46 +40,41 @@ class Agent(Generic[DepsT, ResultT]):
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 
-  # TODO: use protocol to replace Any
-  memory: Any | None = None
-  checkpoint_store: CheckpointStore | None = None
-  scheduler: Any | None = None
+  # ------------------------------------------------------------------ #
+  # Quick-start shortcuts (Level-1 API)
+  # ------------------------------------------------------------------ #
 
-  def tool(
+  async def run(
     self,
-    func: Callable | None = None,
-    *,
-    description: str | None = None,
-    default_retry: RetryPolicy | None = None,
-    default_timeout: float | None = None,
-  ):
-    """
-    Pythonic way to create a tool with decorator
-    Usage:
-      @agent.tool()
-      def tool_func():
-        pass
-    """
-    def wrapper(f: Callable) -> Capability:
-      if isinstance(f, Capability) or hasattr(f, "invoke"):
-        self.tools.append(f)
-        return f 
-        
-      t = make_tool(
-        f,
-        description=description,
-        default_retry=default_retry,
-        default_timeout=default_timeout,
-      )
-      self.tools.append(t)
-      return t
+    prompt: str,
+    deps: DepsT | None = None,
+  ) -> "RunResult[ResultT]":
+    """Create a default Runner and execute in auto-detected mode.
 
-    if func is None:
-      return wrapper
-    return wrapper(func)
+    This is the simplest entry-point for one-off executions::
 
-  def add_tools(self, registry: ToolRegistry) -> None:
+        result = await agent.run("What's the weather in Beijing?")
     """
-    Explicitly bind tools from a ToolRegistry
-    """
-    self.tools.extend(registry.get_all())
+    from nonoka.core.runner import Runner
+    runner = Runner(model=self.model)
+    return await runner.run(self, prompt, deps)
+
+  async def run_chat(
+    self,
+    prompt: str,
+    deps: DepsT | None = None,
+  ) -> "RunResult[ResultT]":
+    """Force conversational (ReAct) mode."""
+    from nonoka.core.runner import Runner
+    runner = Runner(model=self.model)
+    return await runner.run_chat(self, prompt, deps)
+
+  async def run_plan(
+    self,
+    plan: "Plan",
+    deps: DepsT | None = None,
+  ) -> "RunResult[ResultT]":
+    """Execute a user-defined Plan via DAGScheduler."""
+    from nonoka.core.runner import Runner
+    runner = Runner(model=self.model)
+    return await runner.run_plan(self, plan, deps)

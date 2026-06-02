@@ -1,7 +1,7 @@
 import os
 import pytest
 from nonoka.core.llm import LLMMessage, LLMMessageRole
-from nonoka.backends.llm.litellm_ext import LiteLLMProvider
+from nonoka.core.llm import LiteLLMProvider
 
 
 @pytest.mark.asyncio

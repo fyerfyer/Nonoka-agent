@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from pydantic import ValidationError
 import inspect
+import typing
 from collections.abc import Callable, Coroutine
 from typing import Any, get_type_hints
 
@@ -8,6 +9,34 @@ from pydantic import TypeAdapter, create_model
 
 from nonoka.core.types import Capability, RetryPolicy
 from nonoka.core.context import RunContext
+
+
+def _is_run_context_type(hint: Any) -> bool:
+    """Check whether *hint* resolves to ``RunContext`` (including generic forms).
+
+    Handles:
+    * ``RunContext`` (bare)
+    * ``RunContext[AppDeps]`` (generic alias)
+    * ``Annotated[RunContext[AppDeps], ...]`` (PEP 593 wrapper)
+    * ``Optional[RunContext]`` (Union)
+    """
+    if hint is RunContext:
+        return True
+
+    origin = typing.get_origin(hint)
+    if origin is RunContext:
+        return True
+
+    # Handle Annotated[..., ...]
+    if hasattr(hint, "__metadata__") and hasattr(hint, "__args__"):
+        return _is_run_context_type(hint.__args__[0])
+
+    # Handle Union / Optional
+    if origin is typing.Union and hasattr(hint, "__args__"):
+        return any(_is_run_context_type(arg) for arg in hint.__args__)
+
+    return False
+
 
 class Tool(Capability):
   """
@@ -29,14 +58,13 @@ class Tool(Capability):
     self.default_timeout = default_timeout
     self._sig = inspect.signature(func)
     self._type_hints = get_type_hints(func)
-    
-    # Inspect parameter of RunContext  
+
+    # Inspect parameter of RunContext
     self._ctx_param_name = None
-    for name, param in self._sig.parameters.items():
-      hint = self._type_hints.get(name)
-      # Check if the type hint is RunContext
-      if (hint and getattr(hint, "__origin__", hint) is RunContext) or name == "ctx":
-        self._ctx_param_name = name
+    for pname, _param in self._sig.parameters.items():
+      hint = self._type_hints.get(pname)
+      if (hint and _is_run_context_type(hint)) or pname == "ctx":
+        self._ctx_param_name = pname
         break
     self._parameters_schema, self._params_model = self._build_parameters()
     self._returns_schema = self._build_returns_schema()
@@ -66,12 +94,23 @@ class Tool(Capability):
         raise ValueError(f"Tool '{self.name}' arguments validation failed:\n{e}")
     else:
       kwargs = {}
-    # Inject context  
+    # Inject context
     if self._ctx_param_name:
       kwargs[self._ctx_param_name] = ctx
-      
+
     return await self._func(**kwargs)
-    
+
+  def to_json_schema(self) -> dict[str, Any]:
+    """OpenAI-compatible function schema for LLM tool-calling."""
+    return {
+      "type": "function",
+      "function": {
+        "name": self.name,
+        "description": self.description,
+        "parameters": self.parameters,
+      },
+    }
+
   def _build_parameters(self) -> tuple[dict[str, Any], type[BaseModel] | None]:
     """
     Use Pydantic to generate JSON Schema and return the validation model.

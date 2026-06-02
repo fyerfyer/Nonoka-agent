@@ -1,6 +1,8 @@
 import pytest
 from nonoka.core.tool import tool
-from nonoka.core.types import RunContext
+from nonoka.core.context import RunContext
+from nonoka.core.session import Session
+from nonoka.core.agent import Agent
 
 
 def test_tool_schema_generation():
@@ -33,7 +35,9 @@ async def test_tool_invoke_validation():
   async def add(a: int, b: int) -> int:
     return a + b
 
-  ctx = RunContext(deps=None, session_id="test")
+  agent = Agent(model="test")
+  session = Session(session_id="test", agent=agent, deps=None)
+  ctx = RunContext(session)
 
   # Normal invocation
   result = await add.invoke(ctx, {"a": 1, "b": 2})

@@ -1,11 +1,34 @@
 from typing import TYPE_CHECKING
 from dataclasses import dataclass
-from typing import Any, Protocol, TypeVar, runtime_checkable
+from typing import Any, Protocol, TypeVar, runtime_checkable, Generic
 
 if TYPE_CHECKING:
   from nonoka.core import RunContext
 
 DepsT = TypeVar("DepsT")
+ResultT = TypeVar("ResultT")
+
+from enum import Enum
+
+class IsolationLevel(str, Enum):
+  NONE = "none"
+  CONTEXT = "context"
+  STATE = "state"
+  PROCESS = "process"
+
+class ToolErrorAction(str, Enum):
+  RETRY = "retry"
+  HALT = "halt"
+  REPORT = "report"
+  FAIL = "fail"
+
+@dataclass
+class RunResult(Generic[ResultT]):
+  """Result of an Agent run."""
+  success: bool
+  data: ResultT | None = None
+  session: Any | None = None
+  error: str | None = None
 
 @dataclass
 class RetryPolicy:
@@ -32,13 +55,17 @@ class Capability(Protocol):
   def returns(self) -> dict[str, Any]: ...
   
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any: ...
-  
-  def to_json_schema(self) -> dict[str, Any]:
-    return {
-      "type": "function",
-      "function": {
-        "name": self.name,
-        "description": self.description,
-        "parameters": self.parameters,
-      },
-    }
+
+  def to_json_schema(self) -> dict[str, Any]: ...
+
+
+def to_openai_schema(capability: Capability) -> dict[str, Any]:
+  """Convert any *Capability* to an OpenAI-compatible function schema."""
+  return {
+    "type": "function",
+    "function": {
+      "name": capability.name,
+      "description": capability.description,
+      "parameters": capability.parameters,
+    },
+  }
