@@ -53,7 +53,7 @@ class Agent(Generic[DepsT, ResultT]):
 
     This is the simplest entry-point for one-off executions::
 
-        result = await agent.run("What's the weather in Beijing?")
+      result = await agent.run("What's the weather in Beijing?")
     """
     from nonoka.core.runner import Runner
     runner = Runner(model=self.model)

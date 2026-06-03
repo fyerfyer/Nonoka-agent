@@ -58,6 +58,9 @@ class SessionState(BaseModel):
   failed_steps: dict[str, StepFailure] = Field(default_factory=dict)
   step_statuses: dict[str, StepStatus] = Field(default_factory=dict)
 
+  # Memory snapshot for conversational checkpoint/resume
+  memory_entries: list[dict[str, Any]] = Field(default_factory=list)
+
   start_time: datetime | None = None
   end_time: datetime | None = None
   turn_count: int = 0
@@ -92,6 +95,10 @@ class Session:
 
   def to_state(self) -> SessionState:
     """Serialize to immutable state for checkpoint."""
+    memory_entries: list[dict[str, Any]] = []
+    if self.memory is not None:
+      memory_entries = [entry.model_dump(mode="json") for entry in self.memory.entries]
+
     return SessionState(
       session_id=self.session_id,
       status=self.status,
@@ -99,6 +106,7 @@ class Session:
       completed_steps=self.completed_steps.copy(),
       failed_steps=self.failed_steps.copy(),
       step_statuses=self.step_statuses.copy(),
+      memory_entries=memory_entries,
       start_time=self.start_time,
       end_time=self.end_time,
       turn_count=self.turn_count,
@@ -129,4 +137,10 @@ class Session:
     session.end_time = state.end_time
     session.turn_count = state.turn_count
     session.step_count = state.step_count
+
+    # Restore memory entries if memory is provided and state has a snapshot
+    if memory is not None and state.memory_entries:
+      from nonoka.core.memory import MemoryEntry
+      memory.entries = [MemoryEntry(**entry) for entry in state.memory_entries]
+
     return session

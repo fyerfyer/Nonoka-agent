@@ -2,9 +2,6 @@ from enum import Enum
 from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
 from pydantic import BaseModel, Field
 
-if TYPE_CHECKING:
-  from nonoka.core.llm import LLMMessage
-
 
 class MemoryRole(str, Enum):
   SYSTEM = "system"
