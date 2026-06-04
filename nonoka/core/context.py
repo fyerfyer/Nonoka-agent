@@ -45,6 +45,15 @@ class RunContext(Generic[DepsT]):
   def memory(self) -> "WorkingMemory | None":
     return self._session.memory
 
+  @property
+  def session(self) -> "Session":
+    """Read-only access to the underlying ``Session``.
+
+    Tools can inspect ``session.completed_steps``, ``session.turn_count``,
+    etc., but mutating execution state directly is discouraged.
+    """
+    return self._session
+
   # ------------------------------------------------------------------ #
   # Tool helper
   # ------------------------------------------------------------------ #

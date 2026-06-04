@@ -35,6 +35,11 @@ class MaxTurnsExceeded(AgentError):
   """max turns exceeded"""
   pass
 
+
+class MaxStepsExceeded(AgentError):
+  """max steps exceeded"""
+  pass
+
 class ToolErrorActionType(str, Enum):
   RETRY = "retry"
   HALT = "halt"

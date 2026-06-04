@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, Any
 
-from nonoka.core.plan import Plan
 from nonoka.core.types import Capability, RetryPolicy, RunResult
 
 DepsT = TypeVar("DepsT")
@@ -16,15 +15,19 @@ class Agent(Generic[DepsT, ResultT]):
   It holds the model, tools, and execution policy.  Runtime state
   (plan progress, checkpoint, memory) lives in ``Session``.
 
-  Usage:
+  Agent does **not** execute directly — use ``Runner`` to choose an
+  execution paradigm (``run_react``, ``run_plan``, ``run_reflective``).
 
-    from nonoka import Agent, tool
+  Usage::
+
+    from nonoka import Agent, tool, Runner
 
     @tool
     async def get_weather(city: str) -> dict: ...
 
     agent = Agent(model="gpt-4o", tools=[get_weather])
-    result = await agent.run("What's the weather in Beijing?")
+    runner = Runner()
+    result = await runner.run_react(agent, "What's the weather in Beijing?")
   """
   model: str
   tools: list[Capability] = field(default_factory=list)
@@ -40,41 +43,19 @@ class Agent(Generic[DepsT, ResultT]):
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 
-  # ------------------------------------------------------------------ #
-  # Quick-start shortcuts (Level-1 API)
-  # ------------------------------------------------------------------ #
-
   async def run(
     self,
     prompt: str,
     deps: DepsT | None = None,
-  ) -> "RunResult[ResultT]":
-    """Create a default Runner and execute in auto-detected mode.
+    **runner_kwargs: Any,
+  ) -> RunResult[ResultT]:
+    """Convenience shortcut: create a default Runner and execute in ReAct mode.
 
-    This is the simplest entry-point for one-off executions::
-
-      result = await agent.run("What's the weather in Beijing?")
+    Args:
+      prompt: The user prompt / task description.
+      deps: Optional dependency object injected into tools.
+      **runner_kwargs: Passed to ``Runner`` constructor (e.g. ``checkpoint="redis"``).
     """
     from nonoka.core.runner import Runner
-    runner = Runner(model=self.model)
-    return await runner.run(self, prompt, deps)
-
-  async def run_chat(
-    self,
-    prompt: str,
-    deps: DepsT | None = None,
-  ) -> "RunResult[ResultT]":
-    """Force conversational (ReAct) mode."""
-    from nonoka.core.runner import Runner
-    runner = Runner(model=self.model)
-    return await runner.run_chat(self, prompt, deps)
-
-  async def run_plan(
-    self,
-    plan: "Plan",
-    deps: DepsT | None = None,
-  ) -> "RunResult[ResultT]":
-    """Execute a user-defined Plan via DAGScheduler."""
-    from nonoka.core.runner import Runner
-    runner = Runner(model=self.model)
-    return await runner.run_plan(self, plan, deps)
+    runner = Runner(model=self.model, **runner_kwargs)
+    return await runner.run_react(self, prompt, deps)

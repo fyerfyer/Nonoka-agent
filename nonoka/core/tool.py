@@ -84,6 +84,37 @@ class Tool(Capability):
   @property
   def returns(self) -> dict[str, Any]:
     return self._returns_schema
+  async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+    """Allow calling the tool directly like a normal async function.
+
+    Positional arguments are bound according to the original function
+    signature.  If the tool requires ``RunContext`` it must be passed as
+    a keyword argument matching the parameter name (usually ``ctx``).
+    """
+    # Bind positional + keyword args using the original signature
+    try:
+      bound = self._sig.bind(*args, **kwargs)
+      bound.apply_defaults()
+    except TypeError as exc:
+      raise TypeError(f"Tool '{self.name}' call failed: {exc}") from exc
+
+    call_kwargs = dict(bound.arguments)
+
+    # Validate with Pydantic (skip RunContext parameter)
+    if self._params_model:
+      validate_kwargs = {
+        k: v for k, v in call_kwargs.items()
+        if k != self._ctx_param_name
+      }
+      try:
+        validated = self._params_model.model_validate(validate_kwargs)
+        for k, v in validated.model_dump().items():
+          call_kwargs[k] = v
+      except ValidationError as e:
+        raise ValueError(f"Tool '{self.name}' arguments validation failed:\n{e}")
+
+    return await self._func(**call_kwargs)
+
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any:
     # Convert and validate arguments
     if self._params_model:

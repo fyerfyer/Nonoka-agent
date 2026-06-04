@@ -13,6 +13,15 @@ from .errors import (
   ResourceError,
   MaxTurnsExceeded,
 )
+from .paradigm import (
+  ReActAgent,
+  PlanExecutor,
+  ReflectiveAgent,
+  EvaluationResult,
+  Evaluator,
+  Actor,
+  ToolEvaluator,
+)
 
 __all__ = [
   "Agent",
@@ -33,4 +42,11 @@ __all__ = [
   "SafetyError",
   "ResourceError",
   "MaxTurnsExceeded",
+  "ReActAgent",
+  "PlanExecutor",
+  "ReflectiveAgent",
+  "EvaluationResult",
+  "Evaluator",
+  "Actor",
+  "ToolEvaluator",
 ]

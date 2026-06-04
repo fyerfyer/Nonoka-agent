@@ -6,11 +6,10 @@ from nonoka.core.context import RunContext
 from nonoka.core.session import Session, SessionStatus, StepStatus, StepResult, StepFailure
 from nonoka.core.plan import Plan, Step, PlanBuilder, ref, Ref
 from nonoka.core.scheduler import (
-  ConversationalScheduler,
-  DAGScheduler,
   _resolve_refs,
   _resolve_path,
 )
+from nonoka.core.paradigm import ReActAgent, PlanExecutor
 from nonoka.core.errors import ErrorPolicy, TransientError, LogicError
 from nonoka.backends.checkpoint.memory import MemoryCheckpointStore
 
@@ -108,11 +107,11 @@ def test_plan_builder_callable_tool():
 
 
 # --------------------------------------------------------------------------- #
-# DAGScheduler
+# PlanExecutor (was DAGScheduler)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_dag_scheduler_executes_plan():
+async def test_plan_executor_executes_plan():
   @tool
   async def add(ctx: RunContext, a: int, b: int) -> int:
     return a + b
@@ -140,8 +139,8 @@ async def test_dag_scheduler_executes_plan():
       self.llm = None
 
   runner = MockRunner()
-  scheduler = DAGScheduler()
-  result = await scheduler.run_plan(session, runner)
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
 
   assert result.success is True
   assert session.status == SessionStatus.COMPLETED
@@ -152,7 +151,7 @@ async def test_dag_scheduler_executes_plan():
 
 
 @pytest.mark.asyncio
-async def test_dag_scheduler_ref_resolution():
+async def test_plan_executor_ref_resolution():
   @tool
   async def concat(ctx: RunContext, prefix: str, suffix: str) -> str:
     return prefix + suffix
@@ -176,15 +175,15 @@ async def test_dag_scheduler_ref_resolution():
       self.llm = None
 
   runner = MockRunner()
-  scheduler = DAGScheduler()
-  result = await scheduler.run_plan(session, runner)
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
 
   assert result.success is True
   assert session.completed_steps["s2"].data == "Hello, world!"
 
 
 @pytest.mark.asyncio
-async def test_dag_scheduler_step_retry_and_failure():
+async def test_plan_executor_step_retry_and_failure():
   call_count = 0
 
   @tool
@@ -214,8 +213,8 @@ async def test_dag_scheduler_step_retry_and_failure():
       self.llm = None
 
   runner = MockRunner()
-  scheduler = DAGScheduler()
-  result = await scheduler.run_plan(session, runner)
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
 
   assert result.success is True
   assert call_count == 3
@@ -223,7 +222,7 @@ async def test_dag_scheduler_step_retry_and_failure():
 
 
 @pytest.mark.asyncio
-async def test_dag_scheduler_step_timeout():
+async def test_plan_executor_step_timeout():
   @tool
   async def slow(ctx: RunContext) -> str:
     await asyncio.sleep(10)
@@ -247,8 +246,8 @@ async def test_dag_scheduler_step_timeout():
       self.llm = None
 
   runner = MockRunner()
-  scheduler = DAGScheduler()
-  result = await scheduler.run_plan(session, runner)
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
 
   assert result.success is False
   assert "s1" in session.failed_steps
@@ -256,7 +255,7 @@ async def test_dag_scheduler_step_timeout():
 
 
 @pytest.mark.asyncio
-async def test_dag_scheduler_skips_completed_on_resume():
+async def test_plan_executor_skips_completed_on_resume():
   @tool
   async def identity(ctx: RunContext, x: int) -> int:
     return x
@@ -283,8 +282,8 @@ async def test_dag_scheduler_skips_completed_on_resume():
       self.llm = None
 
   runner = MockRunner()
-  scheduler = DAGScheduler()
-  result = await scheduler.resume(session, runner)
+  executor = PlanExecutor()
+  result = await executor.resume(plan, session, runner)
 
   assert result.success is True
   # s1 should keep its checkpointed result, s2 should execute
@@ -293,7 +292,7 @@ async def test_dag_scheduler_skips_completed_on_resume():
 
 
 # --------------------------------------------------------------------------- #
-# ConversationalScheduler
+# ReActAgent (was ConversationalScheduler)
 # --------------------------------------------------------------------------- #
 
 class MockLLM:
@@ -311,7 +310,7 @@ class MockLLM:
 
 
 @pytest.mark.asyncio
-async def test_conversational_scheduler_no_tool_calls():
+async def test_react_agent_no_tool_calls():
   @tool
   async def noop(ctx: RunContext) -> str:
     return "noop"
@@ -330,8 +329,8 @@ async def test_conversational_scheduler_no_tool_calls():
       self.llm = mock_llm
 
   runner = MockRunner()
-  scheduler = ConversationalScheduler()
-  result = await scheduler.run(session, runner, prompt="Hello")
+  paradigm = ReActAgent()
+  result = await paradigm.run(session, runner, prompt="Hello")
 
   assert result.success is True
   assert result.data == "Final answer"
@@ -339,7 +338,7 @@ async def test_conversational_scheduler_no_tool_calls():
 
 
 @pytest.mark.asyncio
-async def test_conversational_scheduler_tool_call_and_retry():
+async def test_react_agent_tool_call_and_retry():
   call_count = 0
 
   @tool
@@ -376,15 +375,15 @@ async def test_conversational_scheduler_tool_call_and_retry():
       self.llm = mock_llm
 
   runner = MockRunner()
-  scheduler = ConversationalScheduler()
-  result = await scheduler.run(session, runner, prompt="Add 1+2")
+  paradigm = ReActAgent()
+  result = await paradigm.run(session, runner, prompt="Add 1+2")
 
   assert result.success is True
   assert call_count == 2  # 1st failed, retried, 2nd succeeded
 
 
 @pytest.mark.asyncio
-async def test_conversational_scheduler_max_turns():
+async def test_react_agent_max_turns():
   agent = Agent(model="test", max_turns=2)
   session = Session(session_id="test", agent=agent, deps=None)
   store = MemoryCheckpointStore()
@@ -409,8 +408,8 @@ async def test_conversational_scheduler_max_turns():
       self.llm = mock_llm
 
   runner = MockRunner()
-  scheduler = ConversationalScheduler()
-  result = await scheduler.run(session, runner, prompt="Test")
+  paradigm = ReActAgent()
+  result = await paradigm.run(session, runner, prompt="Test")
 
   assert result.success is False
   assert "Max turns" in result.error

@@ -71,6 +71,9 @@ class Step:
   depends_on: FrozenSet[str] = frozenset()  # Step ID dependencies
   retry: RetryPolicy = field(default_factory=RetryPolicy)
   timeout: float | None = None              # None indicates fallback to Agent's default timeout
+  idempotent: bool = False                  # If True, step may be safely skipped on resume
+  cache_key: str | None = None              # Custom key for external cache lookup
+  force_rerun: bool = False                 # If True, always re-execute even if completed
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,12 @@ class PlanBuilder:
     self,
     id: str,
     tool: str | Callable[..., Any],
+    depends_on: set[str] | list[str] | str | None = None,
+    retry: RetryPolicy | None = None,
+    timeout: float | None = None,
+    idempotent: bool = False,
+    cache_key: str | None = None,
+    force_rerun: bool = False,
     **args: Any,
   ) -> "PlanBuilder":
     """Add a step to the plan.
@@ -152,6 +161,14 @@ class PlanBuilder:
       id: Unique step identifier.
       tool: Tool name (``str``) or a callable decorated with ``@tool`` (has
         a ``name`` attribute).
+      depends_on: Explicit step ID dependencies.  Can be a single string,
+        a list of strings, or a set of strings.  In addition, any ``Ref``
+        value in ``**args`` is automatically detected as a dependency.
+      retry: Per-step retry policy.  Overrides the Agent's default.
+      timeout: Per-step timeout in seconds.  Overrides the Agent's default.
+      idempotent: Whether the step can be safely skipped if already completed.
+      cache_key: Optional custom key for external cache lookup.
+      force_rerun: If True, always re-execute even if already completed.
       **args: Static arguments or ``ref()`` markers.  Any ``Ref`` value
         automatically adds the referenced step to ``depends_on``.
     """
@@ -166,17 +183,38 @@ class PlanBuilder:
     else:
       raise TypeError(f"tool must be a string name or a @tool-decorated callable, got {type(tool)}")
 
-    # Auto-detect dependencies from Ref values
+    # Collect explicit dependencies
     deps: set[str] = set()
+    if depends_on is not None:
+      if isinstance(depends_on, str):
+        deps.add(depends_on)
+      else:
+        deps.update(depends_on)
+
+    # Auto-detect dependencies from Ref values (recursively in lists/dicts)
+    def _collect_refs(obj: Any) -> None:
+      if isinstance(obj, Ref):
+        deps.add(obj.step_id)
+      elif isinstance(obj, dict):
+        for v in obj.values():
+          _collect_refs(v)
+      elif isinstance(obj, list):
+        for item in obj:
+          _collect_refs(item)
+
     for val in args.values():
-      if isinstance(val, Ref):
-        deps.add(val.step_id)
+      _collect_refs(val)
 
     step = Step(
       id=id,
       tool=tool_name,
       args=args,
       depends_on=frozenset(deps),
+      retry=retry if retry else RetryPolicy(),
+      timeout=timeout,
+      idempotent=idempotent,
+      cache_key=cache_key,
+      force_rerun=force_rerun,
     )
     self._steps.append(step)
     self._step_ids.add(id)
