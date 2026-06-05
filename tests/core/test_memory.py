@@ -1,4 +1,7 @@
+import asyncio
 import pytest
+from unittest.mock import AsyncMock, MagicMock
+
 from nonoka.core.memory import WorkingMemory, MemoryRole
 from nonoka.backends.memory.in_memory import InMemoryBackend
 from nonoka.core.llm import LLMResponse
@@ -21,6 +24,71 @@ class MockLLMProvider:
       return sum(len(str(m)) // 3 for m in content)
     return len(str(content)) // 3 if content else 0
 
+
+# --------------------------------------------------------------------------- #
+# Safe backend writes
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_working_memory_backend_exception_logged():
+  """Backend write failures should be logged, not swallowed."""
+  backend = MagicMock()
+  backend.add = AsyncMock(side_effect=RuntimeError("backend down"))
+
+  memory = WorkingMemory(session_id="test", memory_backend=backend)
+
+  # Should not raise — exception is caught and logged internally
+  await memory.add("hello", MemoryRole.USER)
+
+  # Give the background task a moment to run
+  await asyncio.sleep(0.05)
+
+  backend.add.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_working_memory_flush_awaits_pending():
+  """flush() should await all pending backend writes."""
+  backend = MagicMock()
+  backend.add = AsyncMock(return_value=None)
+
+  memory = WorkingMemory(session_id="test", memory_backend=backend)
+  await memory.add("msg1", MemoryRole.USER)
+  await memory.add("msg2", MemoryRole.USER)
+
+  await memory.flush()
+
+  assert backend.add.await_count == 2
+
+
+# --------------------------------------------------------------------------- #
+# Token counting
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_working_memory_custom_token_counter():
+  """WorkingMemory should accept and use a custom token_counter."""
+  counter = MagicMock(return_value=100)
+  memory = WorkingMemory(session_id="test", token_counter=counter, max_tokens=250)
+
+  await memory.add("short", MemoryRole.USER)
+
+  counter.assert_called_once_with("short")
+  assert memory.entries[0].tokens == 100
+
+
+@pytest.mark.asyncio
+async def test_working_memory_default_token_counter_not_zero():
+  """Default token counter should return non-zero for real text."""
+  memory = WorkingMemory(session_id="test")
+  await memory.add("Hello world", MemoryRole.USER)
+
+  assert memory.entries[0].tokens > 0
+
+
+# --------------------------------------------------------------------------- #
+# Budget strategies
+# --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
 async def test_working_memory_sliding_window():

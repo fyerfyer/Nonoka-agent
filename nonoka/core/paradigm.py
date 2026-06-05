@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
 from nonoka.core.session import Session, SessionStatus, StepStatus, StepResult, StepFailure
@@ -9,7 +10,7 @@ from nonoka.core.context import RunContext
 from nonoka.core.plan import Step, Plan
 from nonoka.core.event import AgentEvent, EventType
 from nonoka.core.logger import get_logger
-from nonoka.core.llm import LLMMessage, LLMMessageRole
+from nonoka.core.llm import LLMMessage, LLMMessageRole, LLMResponse
 from nonoka.core.memory import MemoryRole
 from nonoka.core.errors import (
   ErrorPolicy,
@@ -259,9 +260,291 @@ class ReActAgent:
     """Resume a conversational session from checkpoint."""
     return await self.run(session, runner, prompt="")
 
+  async def run_stream(
+    self,
+    session: Session,
+    runner: Any,
+    prompt: str = "",
+  ) -> AsyncIterator[Any]:
+    """Streaming variant of the ReAct loop.
+
+    Yields ``StreamEvent`` objects so CLI callers can render LLM output
+    incrementally and observe tool-call progress.  The execution semantics
+    are identical to ``run()``; only the result delivery is streaming.
+    """
+    from nonoka.core.runner import StreamEvent
+
+    session.status = SessionStatus.RUNNING
+    await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+    if prompt and session.memory is not None:
+      await session.memory.add(prompt, MemoryRole.USER)
+
+    max_concurrency = (
+      self.max_concurrency
+      if self.max_concurrency is not None
+      else session.agent.max_concurrency
+    )
+    sem = asyncio.Semaphore(max_concurrency)
+
+    try:
+      for turn in range(session.agent.max_turns):
+        session.check_cancelled()
+        session.turn_count = turn + 1
+
+        messages = self._build_messages(session)
+        tools = [t.to_json_schema() for t in session.agent.tools] if session.agent.tools else None
+
+        # --- Streaming LLM call --------------------------------------
+        accumulated_content = ""
+        accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+
+        try:
+          stream = runner.llm.chat_stream(
+            messages=messages,
+            tools=tools or None,
+          )
+        except CancelledError:
+          raise
+        except Exception as exc:
+          _logger.error(
+            "llm.chat_stream_failed",
+            session_id=session.session_id,
+            turn=turn + 1,
+            error=str(exc),
+          )
+          raise TransientError(f"LLM streaming call failed: {exc}") from exc
+
+        async for chunk in stream:
+          if chunk.content_delta:
+            accumulated_content += chunk.content_delta
+            yield StreamEvent(
+              type="content_delta",
+              data={"content": chunk.content_delta},
+            )
+
+          if chunk.tool_call_deltas:
+            self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
+
+          if chunk.finish_reason:
+            break
+
+        tool_calls = self._finalize_tool_calls(accumulated_tool_calls)
+        response = LLMResponse(
+          content=accumulated_content or None,
+          tool_calls=tool_calls or None,
+        )
+
+        _logger.info(
+          "llm.stream_response",
+          session_id=session.session_id,
+          turn=turn + 1,
+          has_tool_calls=bool(tool_calls),
+        )
+
+        # --- No tool calls → final answer ---------------------------
+        if not response.tool_calls:
+          content = response.content or ""
+
+          if session.memory is not None:
+            await session.memory.add(content, MemoryRole.ASSISTANT)
+
+          parsed_data: Any = content
+          if session.agent.result_type is not None:
+            parsed_data = await self._parse_result_type(session, runner, content, turn)
+            if parsed_data is None:
+              continue
+
+          session.status = SessionStatus.COMPLETED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          final_data = self._extract_result_data(session, parsed_data)
+          yield StreamEvent(
+            type="final",
+            data={
+              "success": True,
+              "data": final_data,
+            },
+          )
+          return
+
+        # --- Tool calls → execute -----------------------------------
+        if session.memory is not None:
+          await session.memory.add(
+            response.content or "",
+            MemoryRole.ASSISTANT,
+            tool_calls=response.tool_calls,
+          )
+
+        yield StreamEvent(
+          type="tool_call_start",
+          data={"tool_calls": response.tool_calls},
+        )
+
+        num_tool_calls = len(response.tool_calls)
+        if session.agent.max_steps is not None and session.step_count + num_tool_calls > session.agent.max_steps:
+          raise MaxStepsExceeded(
+            f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
+          )
+
+        async def _execute_limited(tc: dict[str, Any]) -> tuple[dict[str, Any], Any]:
+          async with sem:
+            result = await self._execute_tool_call(session, runner, tc)
+            return tc, result
+
+        tool_results = await asyncio.gather(*[
+          _execute_limited(tc)
+          for tc in response.tool_calls
+        ], return_exceptions=True)
+
+        last_tool_result: Any = None
+        for tr in reversed(tool_results):
+          if isinstance(tr, tuple) and not isinstance(tr[1], Exception):
+            last_tool_result = tr[1]
+            break
+        session._last_tool_result = last_tool_result  # type: ignore[attr-defined]
+
+        for item in tool_results:
+          if isinstance(item, Exception):
+            tc_id = "unknown"
+            obs_text = f"Error: {type(item).__name__}: {item}"
+          else:
+            tc, tr = item
+            tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+            obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
+
+            yield StreamEvent(
+              type="tool_call_result",
+              data={
+                "tool_call_id": tc_id,
+                "name": tc.get("function", {}).get("name", ""),
+                "result_preview": str(tr)[:500],
+                "is_error": isinstance(tr, Exception),
+              },
+            )
+
+          if session.memory is not None:
+            await session.memory.add(
+              obs_text,
+              MemoryRole.TOOL,
+              tool_call_id=tc_id,
+            )
+
+        await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+      raise MaxTurnsExceeded(
+        f"Max turns ({session.agent.max_turns}) exceeded for session {session.session_id}"
+      )
+
+    except CancelledError as e:
+      session.status = SessionStatus.CANCELLED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(
+        type="error",
+        data={
+          "success": False,
+          "error": str(e),
+          "error_type": "cancelled",
+        },
+      )
+
+    except (MaxTurnsExceeded, MaxStepsExceeded) as e:
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(
+        type="error",
+        data={
+          "success": False,
+          "error": str(e),
+          "error_type": "limit_exceeded",
+        },
+      )
+
+    except TransientError as e:
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(
+        type="error",
+        data={
+          "success": False,
+          "error": str(e),
+          "error_type": "llm_error",
+        },
+      )
+
+    except Exception as e:
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(
+        type="error",
+        data={
+          "success": False,
+          "error": str(e),
+          "error_type": "unknown",
+        },
+      )
+
   # ------------------------------------------------------------------ #
   # Internal helpers
   # ------------------------------------------------------------------ #
+
+  @staticmethod
+  def _accumulate_tool_deltas(
+    accumulator: dict[int, dict[str, Any]],
+    deltas: list[dict[str, Any]],
+  ) -> None:
+    """Merge incremental tool-call deltas into a complete payload.
+
+    LiteLLM/OpenAI streaming emits partial ``tool_calls`` dicts keyed by
+    ``index``.  We accumulate ``id``, ``type``, ``function.name`` and
+    ``function.arguments`` across chunks.
+    """
+    for delta in deltas:
+      idx = delta.get("index", 0)
+      if idx not in accumulator:
+        accumulator[idx] = {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
+
+      entry = accumulator[idx]
+      if delta.get("id"):
+        entry["id"] = delta["id"]
+      if delta.get("type"):
+        entry["type"] = delta["type"]
+
+      func_delta = delta.get("function", {})
+      if func_delta:
+        current_func = entry["function"]
+        if func_delta.get("name"):
+          current_func["name"] += func_delta["name"]
+        if func_delta.get("arguments"):
+          current_func["arguments"] += func_delta["arguments"]
+
+  @staticmethod
+  def _finalize_tool_calls(
+    accumulator: dict[int, dict[str, Any]],
+  ) -> list[dict[str, Any]] | None:
+    """Convert accumulated streaming deltas into a complete tool_calls list."""
+    if not accumulator:
+      return None
+    # Sort by index and drop any partial entries that lack a name.
+    result = []
+    for idx in sorted(accumulator):
+      entry = accumulator[idx]
+      func = entry.get("function", {})
+      if not func.get("name"):
+        continue
+      result.append({
+        "id": entry.get("id") or f"call_{idx}",
+        "type": entry.get("type", "function"),
+        "function": {
+          "name": func.get("name", ""),
+          "arguments": func.get("arguments", ""),
+        },
+      })
+    return result or None
 
   def _build_messages(self, session: Session) -> list[LLMMessage]:
     """Convert WorkingMemory entries to LLM messages."""

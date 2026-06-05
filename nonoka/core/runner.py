@@ -1,5 +1,8 @@
 import uuid
+from collections.abc import AsyncIterator
 from typing import Any, TypeVar, Generic
+
+from pydantic import BaseModel, Field
 
 from nonoka.core.agent import Agent
 from nonoka.core.session import Session, SessionStatus
@@ -8,7 +11,7 @@ from nonoka.core.types import RunResult
 from nonoka.core.checkpoint import CheckpointStore
 from nonoka.core.memory import MemoryBackend
 from nonoka.core.config import settings
-from nonoka.core.llm import LiteLLMProvider
+from nonoka.core.llm import LiteLLMProvider, CircuitBreaker
 
 DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
@@ -28,6 +31,10 @@ class Runner:
   from ``Runner`` construction.  This eliminates the ambiguity of having
   two places to specify the model.
 
+  **Resilience** — retry, timeout, and circuit-breaker configuration is
+  pulled from ``agent.default_retry`` and ``agent.default_timeout`` so
+  that each Agent can declare its own reliability policy.
+
   Quick-start (all defaults)::
 
     runner = Runner()
@@ -39,15 +46,25 @@ class Runner:
       checkpoint="redis",
       memory="in_memory",
     )
+
+  Streaming usage (CLI)::
+
+    async for event in runner.run_react_stream(agent, "Hello", deps=None):
+        if event.type == "content_delta":
+            print(event.data["content"], end="", flush=True)
   """
 
   def __init__(
     self,
     checkpoint: str | CheckpointStore | None = "memory",
     memory: str | MemoryBackend | None = None,
+    circuit_breaker: CircuitBreaker | None = None,
   ):
     # LLM providers are cached per-model and created lazily on first use.
     self._llm_cache: dict[str, LiteLLMProvider] = {}
+
+    # Optional circuit breaker shared across all providers created by this runner.
+    self._circuit_breaker = circuit_breaker
 
     # 2. Checkpoint store
     self.checkpoint_store = self._resolve_checkpoint(checkpoint)
@@ -69,13 +86,14 @@ class Runner:
       self.llm = self._llm_cache[model]
       return self.llm
 
-    provider = self._create_llm(model)
+    provider = self._create_llm(agent)
     self._llm_cache[model] = provider
     self.llm = provider
     return provider
 
-  def _create_llm(self, model: str) -> LiteLLMProvider:
-    """Create the default LLM provider (LiteLLM)."""
+  def _create_llm(self, agent: Agent[DepsT, ResultT]) -> LiteLLMProvider:
+    """Create the default LLM provider (LiteLLM) bound to *agent*'s policy."""
+    model = agent.model
     # Pass API key / base_url from settings so .env overrides work
     api_key = settings.openai_api_key
     base_url = settings.openai_base_url
@@ -96,6 +114,9 @@ class Runner:
       model=model,
       api_key=api_key,
       base_url=base_url,
+      retry_policy=agent.default_retry,
+      timeout=agent.default_timeout,
+      circuit_breaker=self._circuit_breaker,
     )
 
   # ------------------------------------------------------------------ #
@@ -218,6 +239,27 @@ class Runner:
     paradigm = ReActAgent()
     return await paradigm.run(session, self, prompt=prompt)
 
+  async def run_react_stream(
+    self,
+    agent: Agent[DepsT, ResultT],
+    prompt: str,
+    deps: DepsT,
+    session_id: str | None = None,
+    parent_session_id: str | None = None,
+  ) -> AsyncIterator["StreamEvent"]:
+    """Execute in **ReAct** mode and yield streaming events.
+
+    This is the CLI-friendly entry point: callers receive content deltas,
+    tool-call lifecycle events, and the final result as discrete events
+    rather than a single batched ``RunResult``.
+    """
+    from nonoka.core.paradigm import ReActAgent
+    session = await self._create_session(agent, deps, session_id, parent_session_id)
+    self._ensure_llm(agent)
+    paradigm = ReActAgent()
+    async for event in paradigm.run_stream(session, self, prompt=prompt):
+      yield event
+
   async def run_plan(
     self,
     agent: Agent[DepsT, ResultT],
@@ -337,3 +379,21 @@ class Runner:
       from nonoka.core.paradigm import ReActAgent
       paradigm = ReActAgent()
       return await paradigm.resume(session, self)
+
+
+# ------------------------------------------------------------------ #
+# Stream event model
+# ------------------------------------------------------------------ #
+
+class StreamEvent(BaseModel):
+  """Discrete event emitted by ``Runner.run_react_stream()``.
+
+  Types:
+  * ``content_delta`` — incremental LLM text.
+  * ``tool_call_start`` — LLM requested one or more tools.
+  * ``tool_call_result`` — a tool finished (success or error).
+  * ``final`` — execution finished; ``data`` contains ``RunResult`` fields.
+  * ``error`` — a terminal error occurred.
+  """
+  type: str
+  data: dict[str, Any] = Field(default_factory=dict)

@@ -18,19 +18,25 @@ class Agent(Generic[DepsT, ResultT]):
   Agent does **not** execute directly — use ``Runner`` to choose an
   execution paradigm (``run_react``, ``run_plan``, ``run_reflective``).
 
+  ``tools`` accepts either a list of ``Capability`` objects or a
+  ``ToolRegistry`` (or a mix of both).  Registries are expanded at
+  construction time so the Agent remains a pure data object.
+
   Usage::
 
-    from nonoka import Agent, tool, Runner
+    from nonoka import Agent, tool, Runner, ToolRegistry
 
-    @tool
+    registry = ToolRegistry()
+
+    @registry.register
     async def get_weather(city: str) -> dict: ...
 
-    agent = Agent(model="gpt-4o", tools=[get_weather])
+    agent = Agent(model="gpt-4o", tools=registry)
     runner = Runner()
     result = await runner.run_react(agent, "What's the weather in Beijing?")
   """
   model: str
-  tools: list[Capability] = field(default_factory=list)
+  tools: list[Capability] | "ToolRegistry" = field(default_factory=list)
   system_prompt: str = ""
 
   # Generic type hints for runtime type inference
@@ -43,6 +49,23 @@ class Agent(Generic[DepsT, ResultT]):
   max_concurrency: int = 10  # Max concurrent tool calls within a single turn
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
+
+  def __post_init__(self):
+    """Expand any ``ToolRegistry`` values in *tools* to plain capabilities."""
+    from nonoka.core.registry import ToolRegistry
+
+    flat_tools: list[Capability] = []
+    has_registry = False
+    for item in self.tools if not isinstance(self.tools, ToolRegistry) else [self.tools]:
+      if isinstance(item, ToolRegistry):
+        has_registry = True
+        flat_tools.extend(item.get_all())
+      else:
+        flat_tools.append(item)
+
+    if has_registry or isinstance(self.tools, ToolRegistry):
+      # Frozen dataclass — use object.__setattr__ to mutate once during init.
+      object.__setattr__(self, "tools", flat_tools)
 
   async def run(
     self,

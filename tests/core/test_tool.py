@@ -24,10 +24,6 @@ def test_tool_schema_generation():
   assert "city" in schema.get("required", [])
   assert "days" not in schema.get("required", [])
 
-  # Check return schema
-  ret_schema = get_weather.returns
-  assert ret_schema.get("type") == "object"
-
 
 @pytest.mark.asyncio
 async def test_tool_invoke_validation():
@@ -49,3 +45,22 @@ async def test_tool_invoke_validation():
   with pytest.raises(ValueError, match="validation failed"):
     # Pass a dict to an int parameter
     await add.invoke(ctx, {"a": 1, "b": {"wrong": "type"}})
+
+
+# --------------------------------------------------------------------------- #
+# Dead code removal
+# --------------------------------------------------------------------------- #
+
+def test_to_openai_schema_removed():
+  """to_openai_schema should no longer be exported from nonoka.core.types."""
+  import nonoka.core.types as types_module
+  assert not hasattr(types_module, "to_openai_schema")
+
+
+def test_tool_returns_removed():
+  """Tool should not expose a ``returns`` property anymore."""
+  @tool
+  async def sample() -> dict:
+    return {}
+
+  assert not hasattr(sample, "returns")

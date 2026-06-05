@@ -67,23 +67,19 @@ class Tool(Capability):
         self._ctx_param_name = pname
         break
     self._parameters_schema, self._params_model = self._build_parameters()
-    self._returns_schema = self._build_returns_schema()
-    
+
   @property
   def name(self) -> str:
     return self._name
-    
+
   @property
   def description(self) -> str:
     return self._description
-    
+
   @property
   def parameters(self) -> dict[str, Any]:
     return self._parameters_schema
 
-  @property
-  def returns(self) -> dict[str, Any]:
-    return self._returns_schema
   async def __call__(self, *args: Any, **kwargs: Any) -> Any:
     """Allow calling the tool directly like a normal async function.
 
@@ -148,7 +144,7 @@ class Tool(Capability):
     """
     fields = {}
     for param_name, param in self._sig.parameters.items():
-      if param_name == self._ctx_param_name: 
+      if param_name == self._ctx_param_name:
         continue
       annotation = self._type_hints.get(param_name, Any)
       default = ... if param.default == inspect.Parameter.empty else param.default
@@ -158,12 +154,6 @@ class Tool(Capability):
     # Create a Pydantic Model dynamically
     model = create_model(f"{self.name}_params", **fields)
     return model.model_json_schema(), model
-    
-  def _build_returns_schema(self) -> dict[str, Any]:
-    return_type = self._type_hints.get("return", Any)
-    if return_type is type(None):
-      return {}
-    return TypeAdapter(return_type).json_schema()
 
 
 def tool(

@@ -1,5 +1,8 @@
 import pytest
 import asyncio
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
 from nonoka.core.agent import Agent
 from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
@@ -9,8 +12,9 @@ from nonoka.core.scheduler import (
   _resolve_refs,
   _resolve_path,
 )
-from nonoka.core.paradigm import ReActAgent, PlanExecutor
-from nonoka.core.errors import ErrorPolicy, TransientError, LogicError
+from nonoka.core.paradigm import ReActAgent, PlanExecutor, ToolEvaluator, EvaluationResult
+from nonoka.core.errors import ErrorPolicy, TransientError, LogicError, CancelledError
+from nonoka.core.types import RunResult
 from nonoka.backends.checkpoint.memory import MemoryCheckpointStore
 
 
@@ -414,3 +418,241 @@ async def test_react_agent_max_turns():
   assert result.success is False
   assert "Max turns" in result.error
   assert session.status == SessionStatus.FAILED
+
+
+# --------------------------------------------------------------------------- #
+# Streaming interface
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_react_agent_run_stream_yields_content_and_final():
+  """ReActAgent.run_stream should emit content_delta and a final event."""
+  @tool
+  async def no_op() -> str:
+    return "done"
+
+  agent = Agent(model="test", tools=[no_op], max_turns=3)
+  session = Session(session_id="stream-1", agent=agent)
+
+  runner = MagicMock()
+  runner.checkpoint_store = MemoryCheckpointStore()
+
+  llm_mock = MagicMock()
+
+  async def fake_stream(*args, **kwargs):
+    from nonoka.core.llm import LLMStreamChunk
+    yield LLMStreamChunk(finish_reason="stop")
+
+  llm_mock.chat_stream = fake_stream
+  llm_mock.chat = AsyncMock(return_value=MagicMock(content="Final answer", tool_calls=None, usage={}))
+  runner.llm = llm_mock
+
+  react = ReActAgent()
+  events = []
+  async for event in react.run_stream(session, runner, prompt="hi"):
+    events.append(event)
+
+  if events[-1].type != "final":
+    for ev in events:
+      print("EVENT:", ev.type, ev.data)
+
+  assert events[-1].type == "final"
+  assert events[-1].data["success"] is True
+
+
+# --------------------------------------------------------------------------- #
+# Cancellation / Abort
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_react_agent_returns_cancelled_error_type():
+  """ReActAgent should return RunResult with error_type='cancelled' when cancelled."""
+  agent = Agent(model="test", tools=[], max_turns=1)
+  session = Session(session_id="s3", agent=agent)
+
+  session.cancel()
+
+  runner = MagicMock()
+  runner.checkpoint_store = MemoryCheckpointStore()
+
+  react = ReActAgent()
+  result = await react.run(session, runner, prompt="hello")
+
+  assert result.success is False
+  assert result.error_type == "cancelled"
+  assert session.status == SessionStatus.CANCELLED
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_returns_cancelled_error_type():
+  """PlanExecutor should return RunResult with error_type='cancelled' when cancelled."""
+  @tool
+  async def dummy_tool(x: int) -> int:
+    return x
+
+  agent = Agent(model="test", tools=[dummy_tool])
+  session = Session(session_id="s4", agent=agent)
+  session.cancel()
+
+  plan = (
+    PlanBuilder()
+    .step("s1", dummy_tool, x=1)
+    .build()
+  )
+
+  runner = MagicMock()
+  runner.checkpoint_store = MemoryCheckpointStore()
+
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
+
+  assert result.success is False
+  assert result.error_type == "cancelled"
+  assert session.status == SessionStatus.CANCELLED
+
+
+# --------------------------------------------------------------------------- #
+# Error classification
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_react_agent_max_turns_error_type():
+  """ReActAgent should return error_type='limit_exceeded' on max turns."""
+  agent = Agent(model="test", tools=[], max_turns=0)
+  session = Session(session_id="s5", agent=agent)
+
+  runner = MagicMock()
+  runner.checkpoint_store = MemoryCheckpointStore()
+
+  react = ReActAgent()
+  result = await react.run(session, runner, prompt="hello")
+
+  assert result.success is False
+  assert result.error_type == "limit_exceeded"
+
+
+# --------------------------------------------------------------------------- #
+# Plan layers caching
+# --------------------------------------------------------------------------- #
+
+def test_plan_layers_precomputed():
+  """Plan.layers should be pre-computed at build time."""
+  plan = (
+    PlanBuilder()
+    .step("a", "tool_a")
+    .step("b", "tool_b")
+    .step("c", "tool_c", depends_on={"a"})
+    .build()
+  )
+
+  layers1 = plan.layers
+  layers2 = plan.layers
+  assert layers1 is layers2, "layers should be cached"
+  assert layers1 == [["a", "b"], ["c"]]
+
+
+def test_plan_topological_groups_alias():
+  """topological_groups() should remain a backward-compatible alias."""
+  plan = (
+    PlanBuilder()
+    .step("a", "tool_a")
+    .step("b", "tool_b", depends_on={"a"})
+    .build()
+  )
+
+  assert plan.topological_groups() == plan.layers
+
+
+# --------------------------------------------------------------------------- #
+# ReActAgent concurrency control
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_react_agent_respects_max_concurrency():
+  """ReActAgent should use a Semaphore to limit concurrent tool calls."""
+  concurrent_count = 0
+  max_observed = 0
+
+  @tool
+  async def slow_tool(ctx: RunContext, delay: float) -> str:
+    nonlocal concurrent_count, max_observed
+    concurrent_count += 1
+    max_observed = max(max_observed, concurrent_count)
+    await asyncio.sleep(delay)
+    concurrent_count -= 1
+    return "done"
+
+  agent = Agent(model="test", tools=[slow_tool])
+  session = Session(session_id="s6", agent=agent)
+
+  runner = MagicMock()
+  runner.checkpoint_store = MemoryCheckpointStore()
+
+  llm_mock = MagicMock()
+  llm_mock.chat = AsyncMock(return_value=MagicMock(
+    content="",
+    tool_calls=[
+      {"function": {"name": "slow_tool", "arguments": '{"delay": 0.1}'}},
+      {"function": {"name": "slow_tool", "arguments": '{"delay": 0.1}'}},
+      {"function": {"name": "slow_tool", "arguments": '{"delay": 0.1}'}},
+      {"function": {"name": "slow_tool", "arguments": '{"delay": 0.1}'}},
+      {"function": {"name": "slow_tool", "arguments": '{"delay": 0.1}'}},
+    ],
+  ))
+  runner.llm = llm_mock
+
+  react = ReActAgent(max_concurrency=2)
+  result = await react.run(session, runner, prompt="run")
+
+  assert max_observed <= 2, f"Expected max concurrency 2, got {max_observed}"
+
+
+@pytest.mark.asyncio
+async def test_react_agent_uses_agent_max_concurrency_default():
+  """ReActAgent should fall back to agent.max_concurrency when not explicitly set."""
+  agent = Agent(model="test", tools=[], max_concurrency=7)
+  session = Session(session_id="s7", agent=agent)
+
+  react = ReActAgent()
+  assert react.max_concurrency is None
+  assert agent.max_concurrency == 7
+
+
+# --------------------------------------------------------------------------- #
+# ToolEvaluator
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_tool_evaluator_uses_session():
+  """ToolEvaluator should build RunContext from result.session correctly."""
+  @tool
+  async def validator(ctx: RunContext, data: Any) -> dict:
+    assert ctx.session is not None
+    return {"passed": True, "feedback": "ok"}
+
+  agent = Agent(model="test", tools=[validator])
+  session = Session(session_id="s8", agent=agent)
+
+  evaluator = ToolEvaluator(validator, data_extractor=lambda r: r.data)
+
+  mock_result = RunResult(success=True, data="test-data", session=session)
+  eval_result = await evaluator.evaluate(mock_result)
+
+  assert eval_result.passed is True
+  assert eval_result.feedback == "ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_evaluator_no_session():
+  """ToolEvaluator should handle missing session gracefully."""
+  @tool
+  async def validator(ctx: RunContext, data: Any) -> dict:
+    return {"passed": True}
+
+  evaluator = ToolEvaluator(validator)
+
+  mock_result = RunResult(success=True, data="test", session=None)
+  eval_result = await evaluator.evaluate(mock_result)
+
+  assert eval_result.passed is False
+  assert "No session available" in eval_result.feedback

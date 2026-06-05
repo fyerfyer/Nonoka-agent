@@ -53,15 +53,3 @@ class Capability(Protocol):
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any: ...
 
   def to_json_schema(self) -> dict[str, Any]: ...
-
-
-def to_openai_schema(capability: Capability) -> dict[str, Any]:
-  """Convert any *Capability* to an OpenAI-compatible function schema."""
-  return {
-    "type": "function",
-    "function": {
-      "name": capability.name,
-      "description": capability.description,
-      "parameters": capability.parameters,
-    },
-  }
