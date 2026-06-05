@@ -1,8 +1,14 @@
 from enum import Enum
 from typing import Any
 
+
 class AgentError(Exception):
   """Nonoka Agent base error"""
+  pass
+
+
+class CancelledError(AgentError):
+  """Execution was cancelled by external request (e.g. Ctrl+C, timeout)."""
   pass
 
 
@@ -39,6 +45,7 @@ class MaxTurnsExceeded(AgentError):
 class MaxStepsExceeded(AgentError):
   """max steps exceeded"""
   pass
+
 
 class ToolErrorActionType(str, Enum):
   RETRY = "retry"

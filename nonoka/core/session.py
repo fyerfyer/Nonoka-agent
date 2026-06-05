@@ -1,3 +1,4 @@
+import asyncio
 from enum import Enum
 from typing import Any, TYPE_CHECKING
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ class SessionStatus(str, Enum):
   PAUSED = "paused"
   COMPLETED = "completed"
   FAILED = "failed"
+  CANCELLED = "cancelled"
 
 
 class StepStatus(str, Enum):
@@ -92,6 +94,39 @@ class Session:
     self.end_time: datetime | None = None
     self.turn_count = 0
     self.step_count = 0
+
+    # Cancellation support — asyncio.Event allows cooperative cancellation
+    # and is safe to check across async boundaries.
+    self._cancel_event = asyncio.Event()
+
+  # ------------------------------------------------------------------ #
+  # Cancellation API
+  # ------------------------------------------------------------------ #
+
+  def cancel(self) -> None:
+    """Request cancellation of this session.
+
+    Cancellation is cooperative — paradigms check ``is_cancelled`` at
+    safe boundaries (between turns / layers) and raise ``CancelledError``.
+    """
+    self._cancel_event.set()
+
+  @property
+  def is_cancelled(self) -> bool:
+    """Whether cancellation has been requested."""
+    return self._cancel_event.is_set()
+
+  def check_cancelled(self) -> None:
+    """Raise ``CancelledError`` if cancellation has been requested."""
+    if self._cancel_event.is_set():
+      from nonoka.core.errors import CancelledError
+      raise CancelledError(
+        f"Session {self.session_id} was cancelled by external request."
+      )
+
+  # ------------------------------------------------------------------ #
+  # Serialization
+  # ------------------------------------------------------------------ #
 
   def to_state(self) -> SessionState:
     """Serialize to immutable state for checkpoint."""

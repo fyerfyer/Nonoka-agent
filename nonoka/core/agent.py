@@ -40,6 +40,7 @@ class Agent(Generic[DepsT, ResultT]):
   # Default execution policy
   max_turns: int = 10
   max_steps: int = 50
+  max_concurrency: int = 10  # Max concurrent tool calls within a single turn
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 
@@ -57,5 +58,5 @@ class Agent(Generic[DepsT, ResultT]):
       **runner_kwargs: Passed to ``Runner`` constructor (e.g. ``checkpoint="redis"``).
     """
     from nonoka.core.runner import Runner
-    runner = Runner(model=self.model, **runner_kwargs)
+    runner = Runner(**runner_kwargs)
     return await runner.run_react(self, prompt, deps)

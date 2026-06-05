@@ -28,7 +28,7 @@ async def calculate(expression: str) -> float:
 async def test_plan_executor_returns_data():
     """Item 2: PlanExecutor should return final step data."""
     print("\n=== Test: PlanExecutor returns final data ===")
-    runner = Runner(model="deepseek-chat")
+    runner = Runner()
     agent = Agent(model="deepseek-chat", tools=[calculate])
 
     plan = (
@@ -49,7 +49,7 @@ async def test_react_output_mode():
     print("\n=== Test: ReActAgent output_mode='last_tool_result' ===")
     from nonoka.core.paradigm import ReActAgent
 
-    runner = Runner(model="deepseek-chat")
+    runner = Runner()
     agent = Agent(
         model="deepseek-chat",
         tools=[get_weather],
@@ -75,7 +75,7 @@ async def test_react_output_mode():
 async def test_parent_session_memory_inheritance():
     """Item 7: Cross-session memory inheritance."""
     print("\n=== Test: Parent session memory inheritance ===")
-    runner = Runner(model="deepseek-chat", memory="in_memory")
+    runner = Runner(memory="in_memory")
     agent = Agent(
         model="deepseek-chat",
         system_prompt="You are a helpful assistant. Remember what the user told you.",

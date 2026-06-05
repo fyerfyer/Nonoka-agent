@@ -1,6 +1,11 @@
+import asyncio
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable, TYPE_CHECKING
+from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
+
+from nonoka.core.logger import get_logger
+
+_logger = get_logger("nonoka.memory")
 
 
 class MemoryRole(str, Enum):
@@ -40,6 +45,29 @@ class MemoryBackend(Protocol):
   async def get_user_memory(self, user_id: str, limit: int = 10) -> list[MemoryEntry]: ...
 
 
+# --------------------------------------------------------------------------- #
+# Token counting
+# --------------------------------------------------------------------------- #
+
+def _default_count_tokens(content: str) -> int:
+  """Default token counter — uses litellm when available, falls back to a
+  UTF-8-aware heuristic that is significantly more accurate than ``len // 3``.
+  """
+  if not content:
+    return 0
+  try:
+    import litellm
+    return litellm.token_counter(model="gpt-4", text=content)
+  except Exception:
+    # Fallback: ~1 token per UTF-8 byte for CJK, ~0.25 for ASCII.
+    # This is still a heuristic but far better than char-count // 3.
+    return max(1, len(content.encode("utf-8")) // 3)
+
+
+# --------------------------------------------------------------------------- #
+# WorkingMemory
+# --------------------------------------------------------------------------- #
+
 class WorkingMemory:
   """
   Session-level context window management.
@@ -60,17 +88,22 @@ class WorkingMemory:
     memory_backend: MemoryBackend | None = None,
     max_tokens: int = 8192,
     summary_llm: "Any | None" = None,
+    token_counter: "callable[[str], int] | None" = None,
   ):
     self.session_id = session_id
     self.backend = memory_backend
     self.max_tokens = max_tokens
     self.summary_llm = summary_llm
+    self._token_counter = token_counter or _default_count_tokens
     self.entries: list[MemoryEntry] = []
 
+    # Safe background-write bookkeeping: each backend.add() is wrapped in
+    # an asyncio task so exceptions are logged (not swallowed) and pending
+    # writes can be awaited on shutdown via ``flush()``.
+    self._pending_tasks: set[asyncio.Task[None]] = set()
+
   def _count_tokens(self, content: str) -> int:
-    if self.summary_llm:
-      return self.summary_llm.count_tokens(content)
-    return len(content) // 3 if content else 0
+    return self._token_counter(content)
 
   async def _enforce_budget(self) -> None:
     """Evict oldest non-system entries until we are under ``max_tokens``."""
@@ -140,16 +173,31 @@ class WorkingMemory:
     self.entries.append(entry)
     await self._enforce_budget()
 
-    # Async push to persistent backend (fire-and-forget)
+    # Async push to persistent backend — safe fire-and-forget with
+    # exception logging and graceful flush support.
     if self.backend:
-      import asyncio
-      asyncio.create_task(
-        self.backend.add(
-          content=content,
-          session_id=self.session_id,
-          metadata=metadata,
-        )
+      task = asyncio.create_task(
+        self._safe_backend_add(content, metadata),
       )
+      self._pending_tasks.add(task)
+      task.add_done_callback(self._pending_tasks.discard)
+
+  async def _safe_backend_add(self, content: str, metadata: dict[str, Any]) -> None:
+    """Wrap backend.add() so exceptions are logged, not swallowed."""
+    try:
+      await self.backend.add(
+        content=content,
+        session_id=self.session_id,
+        metadata=metadata,
+      )
+    except Exception:
+      _logger.exception("memory.backend_write_failed")
+
+  async def flush(self) -> None:
+    """Await all pending backend writes. Call before shutdown / checkpoint."""
+    if self._pending_tasks:
+      await asyncio.gather(*self._pending_tasks, return_exceptions=True)
+      self._pending_tasks.clear()
 
   async def get_context(self) -> list[MemoryEntry]:
     """

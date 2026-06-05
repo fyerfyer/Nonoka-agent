@@ -14,6 +14,8 @@ from nonoka.core.memory import MemoryRole
 from nonoka.core.errors import (
   ErrorPolicy,
   SafetyError,
+  TransientError,
+  CancelledError,
   MaxTurnsExceeded,
   MaxStepsExceeded,
   ToolErrorActionType,
@@ -46,7 +48,7 @@ class ReActAgent:
   dynamic branching).
 
   Key features:
-  * Parallel tool calls within a single turn.
+  * Parallel tool calls within a single turn (bounded by *max_concurrency*).
   * Memory is the primary state carrier.
   * No pre-defined Plan; the conversation context drives execution.
 
@@ -57,6 +59,8 @@ class ReActAgent:
       * ``"last_tool_result"`` — the raw result of the last tool call.
     data_extractor: Optional callable ``(Session) -> Any`` that overrides
       ``output_mode`` and extracts custom data from the session.
+    max_concurrency: Maximum concurrent tool calls within a single turn.
+      Defaults to the framework-wide setting (10).
   """
 
   def __init__(
@@ -64,10 +68,12 @@ class ReActAgent:
     error_policy: ErrorPolicy | None = None,
     output_mode: str = "content",
     data_extractor: Any | None = None,
+    max_concurrency: int | None = None,
   ):
     self.error_policy = error_policy or ErrorPolicy()
     self.output_mode = output_mode
     self.data_extractor = data_extractor
+    self.max_concurrency = max_concurrency
 
   async def run(
     self,
@@ -82,8 +88,17 @@ class ReActAgent:
     if prompt and session.memory is not None:
       await session.memory.add(prompt, MemoryRole.USER)
 
+    # Resolve concurrency limit
+    max_concurrency = (
+      self.max_concurrency
+      if self.max_concurrency is not None
+      else session.agent.max_concurrency
+    )
+    sem = asyncio.Semaphore(max_concurrency)
+
     try:
       for turn in range(session.agent.max_turns):
+        session.check_cancelled()
         session.turn_count = turn + 1
 
         # Build messages from memory
@@ -93,10 +108,21 @@ class ReActAgent:
         tools = [t.to_json_schema() for t in session.agent.tools] if session.agent.tools else None
 
         # --- LLM call ------------------------------------------------
-        response = await runner.llm.chat(
-          messages=messages,
-          tools=tools or None,
-        )
+        try:
+          response = await runner.llm.chat(
+            messages=messages,
+            tools=tools or None,
+          )
+        except CancelledError:
+          raise
+        except Exception as exc:
+          _logger.error(
+            "llm.chat_failed",
+            session_id=session.session_id,
+            turn=turn + 1,
+            error=str(exc),
+          )
+          raise TransientError(f"LLM call failed: {exc}") from exc
 
         _logger.info(
           "llm.response",
@@ -144,9 +170,13 @@ class ReActAgent:
             f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
           )
 
-        # Execute tool calls in parallel
+        # Execute tool calls with bounded concurrency
+        async def _execute_limited(tc: dict[str, Any]) -> Any:
+          async with sem:
+            return await self._execute_tool_call(session, runner, tc)
+
         tool_results = await asyncio.gather(*[
-          self._execute_tool_call(session, runner, tc)
+          _execute_limited(tc)
           for tc in response.tool_calls
         ], return_exceptions=True)
 
@@ -181,15 +211,49 @@ class ReActAgent:
         f"Max turns ({session.agent.max_turns}) exceeded for session {session.session_id}"
       )
 
+    except CancelledError as e:
+      session.status = SessionStatus.CANCELLED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="cancelled",
+      )
+
     except (MaxTurnsExceeded, MaxStepsExceeded) as e:
       session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
       await runner.checkpoint_store.save_session(session.session_id, session.to_state())
-      return RunResult(success=False, session=session, error=str(e))
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="limit_exceeded",
+      )
+
+    except TransientError as e:
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="llm_error",
+      )
 
     except Exception as e:
       session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
       await runner.checkpoint_store.save_session(session.session_id, session.to_state())
-      return RunResult(success=False, session=session, error=str(e))
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="unknown",
+      )
 
   async def resume(self, session: Session, runner: Any) -> RunResult:
     """Resume a conversational session from checkpoint."""
@@ -386,8 +450,10 @@ class PlanExecutor:
         return await self._execute_step(step, session, runner)
 
     try:
-      layers = plan.topological_groups()
-      for layer_step_ids in layers:
+      # Use pre-computed layers instead of calling topological_groups() repeatedly
+      for layer_step_ids in plan.layers:
+        session.check_cancelled()
+
         # Handle force_rerun: remove forced steps from completed state
         for sid in layer_step_ids:
           step = plan.get_step(sid)
@@ -414,25 +480,58 @@ class PlanExecutor:
         failures = [r for r in results if isinstance(r, Exception)]
         if failures:
           session.status = SessionStatus.FAILED
+          session.end_time = __import__("datetime").datetime.now()
           await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          first_fail = failures[0]
           return RunResult(
             success=False,
             session=session,
-            error=f"Step(s) failed during execution: {failures[0]}",
+            error=f"Step(s) failed during execution: {first_fail}",
+            error_type="tool_error",
           )
 
         # Checkpoint layer
         await runner.checkpoint_store.save_session(session.session_id, session.to_state())
 
       session.status = SessionStatus.COMPLETED
+      session.end_time = __import__("datetime").datetime.now()
       await runner.checkpoint_store.save_session(session.session_id, session.to_state())
       # Collect final output from the last executed step
       final_data = self._extract_final_data(plan, session)
       return RunResult(success=True, session=session, data=final_data)
+
+    except CancelledError as e:
+      session.status = SessionStatus.CANCELLED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="cancelled",
+      )
+
+    except MaxStepsExceeded as e:
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="limit_exceeded",
+      )
+
     except Exception as e:
       session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
       await runner.checkpoint_store.save_session(session.session_id, session.to_state())
-      return RunResult(success=False, session=session, error=str(e))
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type="unknown",
+      )
 
   async def _execute_step(self, step: Step, session: Session, runner: Any) -> Any:
     """Execute a single step with retry / timeout / checkpoint."""
@@ -541,11 +640,8 @@ class PlanExecutor:
     """
     if not plan.steps:
       return None
-    # Steps in a plan are in insertion order; topological layers give
-    # execution order.  The "last" output is naturally from the last
-    # layer's last step that completed.
-    layers = plan.topological_groups()
-    for layer in reversed(layers):
+    # Use pre-computed layers instead of calling topological_groups() again
+    for layer in reversed(plan.layers):
       for step_id in reversed(layer):
         if step_id in session.completed_steps:
           return session.completed_steps[step_id].data
@@ -634,6 +730,8 @@ class ReflectiveAgent:
     best_score: float = -1.0
 
     for iteration in range(1, self.max_iterations + 1):
+      session.check_cancelled()
+
       _logger.info(
         "reflective.iteration_start",
         session_id=session.session_id,
@@ -706,6 +804,7 @@ class ReflectiveAgent:
       best_score=best_score,
     )
     session.status = SessionStatus.FAILED
+    session.end_time = __import__("datetime").datetime.now()
     await runner.checkpoint_store.save_session(session.session_id, session.to_state())
     return RunResult(
       success=False,
@@ -713,6 +812,7 @@ class ReflectiveAgent:
       session=session,
       error=f"Max reflective iterations ({self.max_iterations}) reached. "
         f"Best score: {best_score}. Last feedback: {feedback}",
+      error_type="limit_exceeded",
     )
 
 
@@ -749,15 +849,15 @@ class ToolEvaluator:
     from nonoka.core.context import RunContext
 
     data = self.data_extractor(result)
-    ctx = result.session
-    if ctx is None:
+    session = result.session
+    if session is None:
       return EvaluationResult(
         passed=False,
         feedback="No session available for evaluation.",
       )
 
-    # Build a synthetic RunContext if needed
-    run_ctx = RunContext(ctx)
+    # Build a synthetic RunContext from the Session
+    run_ctx = RunContext(session)
 
     try:
       raw = await self.validate_tool.invoke(run_ctx, {"data": data})

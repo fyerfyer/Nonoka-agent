@@ -78,15 +78,22 @@ class Step:
 
 @dataclass(frozen=True)
 class Plan:
-  """Immutable execution plan (DAG)"""
+  """Immutable execution plan (DAG).
+
+  ``layers`` is pre-computed at construction time via ``__post_init__``,
+  so topological sorting cost is paid once rather than on every access.
+  """
   steps: tuple[Step, ...]
   objective: str = ""
   metadata: dict = field(default_factory=dict)
 
-  def topological_groups(self) -> list[list[str]]:
-    """
-    Perform topological sorting, grouping step IDs by layers for subsequent parallel execution by DAGScheduler.
-    """
+  def __post_init__(self) -> None:
+    # Store pre-computed layers in a private attribute to avoid
+    # colliding with the frozen dataclass machinery.
+    object.__setattr__(self, "_layers", self._compute_layers())
+
+  def _compute_layers(self) -> list[list[str]]:
+    """Topological sort grouped by execution layers."""
     groups: list[list[str]] = []
     in_degree = {step.id: 0 for step in self.steps}
     graph: dict[str, list[str]] = {step.id: [] for step in self.steps}
@@ -113,6 +120,15 @@ class Plan:
       raise ValueError("Plan contains a cycle in dependencies")
 
     return groups
+
+  @property
+  def layers(self) -> list[list[str]]:
+    """Pre-computed topological layers (read-only)."""
+    return object.__getattribute__(self, "_layers")
+
+  def topological_groups(self) -> list[list[str]]:
+    """Backward-compatible alias for ``layers``."""
+    return self.layers
 
   def get_step(self, step_id: str) -> Step | None:
     for step in self.steps:

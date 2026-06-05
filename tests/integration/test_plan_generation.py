@@ -53,7 +53,7 @@ def test_agent():
 
 @pytest.fixture
 def runner():
-  return Runner(model="deepseek-chat")
+  return Runner()
 
 
 # --------------------------------------------------------------------------- #

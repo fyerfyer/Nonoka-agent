@@ -24,6 +24,10 @@ class Runner:
   The user **explicitly** chooses the execution paradigm via one of the
   ``run_*`` methods.  There is no automatic scheduler selection.
 
+  **Model resolution** — the LLM model is taken from ``agent.model``, not
+  from ``Runner`` construction.  This eliminates the ambiguity of having
+  two places to specify the model.
+
   Quick-start (all defaults)::
 
     runner = Runner()
@@ -32,7 +36,6 @@ class Runner:
   Production usage::
 
     runner = Runner(
-      model="gpt-4o",
       checkpoint="redis",
       memory="in_memory",
     )
@@ -40,12 +43,11 @@ class Runner:
 
   def __init__(
     self,
-    model: str | None = None,
     checkpoint: str | CheckpointStore | None = "memory",
     memory: str | MemoryBackend | None = None,
   ):
-    # 1. LLM — auto-create the default LiteLLM provider
-    self.llm = self._create_llm(model or settings.default_model)
+    # LLM providers are cached per-model and created lazily on first use.
+    self._llm_cache: dict[str, LiteLLMProvider] = {}
 
     # 2. Checkpoint store
     self.checkpoint_store = self._resolve_checkpoint(checkpoint)
@@ -54,8 +56,23 @@ class Runner:
     self.memory_backend = self._resolve_memory(memory)
 
   # ------------------------------------------------------------------ #
-  # Internal helpers for resolving string shorthands or user objects
+  # LLM provider cache — created on demand per agent.model
   # ------------------------------------------------------------------ #
+
+  # Current active LLM provider (set by _ensure_llm for backward compatibility)
+  llm: LiteLLMProvider | None = None  # type: ignore[misc]
+
+  def _ensure_llm(self, agent: Agent[DepsT, ResultT]) -> LiteLLMProvider:
+    """Return a cached LLM provider for *agent.model*, creating one if needed."""
+    model = agent.model
+    if model in self._llm_cache:
+      self.llm = self._llm_cache[model]
+      return self.llm
+
+    provider = self._create_llm(model)
+    self._llm_cache[model] = provider
+    self.llm = provider
+    return provider
 
   def _create_llm(self, model: str) -> LiteLLMProvider:
     """Create the default LLM provider (LiteLLM)."""
@@ -196,6 +213,8 @@ class Runner:
     """
     from nonoka.core.paradigm import ReActAgent
     session = await self._create_session(agent, deps, session_id, parent_session_id)
+    # Ensure LLM is ready for this agent's model
+    self._ensure_llm(agent)
     paradigm = ReActAgent()
     return await paradigm.run(session, self, prompt=prompt)
 
@@ -214,6 +233,7 @@ class Runner:
     """
     from nonoka.core.paradigm import PlanExecutor
     session = await self._create_session(agent, deps, session_id, parent_session_id)
+    self._ensure_llm(agent)
     executor = PlanExecutor()
     return await executor.execute(plan, session, self)
 
@@ -243,6 +263,7 @@ class Runner:
     """
     from nonoka.core.paradigm import ReActAgent, ReflectiveAgent
     session = await self._create_session(agent, deps, session_id, parent_session_id)
+    self._ensure_llm(agent)
     actor = ReActAgent()
     reflective = ReflectiveAgent(
       actor=actor,
@@ -304,6 +325,8 @@ class Runner:
 
     if session.status in {SessionStatus.COMPLETED, SessionStatus.FAILED}:
       return RunResult(success=session.status == SessionStatus.COMPLETED, session=session)
+
+    self._ensure_llm(agent)
 
     # Route to the correct paradigm based on whether a plan was in flight
     if session.current_plan and session.current_plan.steps:

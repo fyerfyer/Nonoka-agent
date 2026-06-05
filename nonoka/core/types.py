@@ -10,17 +10,13 @@ ResultT = TypeVar("ResultT")
 
 from enum import Enum
 
-class IsolationLevel(str, Enum):
-  NONE = "none"
-  CONTEXT = "context"
-  STATE = "state"
-  PROCESS = "process"
 
 class ToolErrorAction(str, Enum):
   RETRY = "retry"
   HALT = "halt"
   REPORT = "report"
   FAIL = "fail"
+
 
 @dataclass
 class RunResult(Generic[ResultT]):
@@ -29,12 +25,15 @@ class RunResult(Generic[ResultT]):
   data: ResultT | None = None
   session: Any | None = None
   error: str | None = None
+  error_type: str | None = None  # "llm_error" | "tool_error" | "timeout" | "cancelled" | ...
+
 
 @dataclass
 class RetryPolicy:
   """Retry Policy"""
   max_retries: int = 3
   backoff: float = 2.0
+
 
 @runtime_checkable
 class Capability(Protocol):
@@ -44,16 +43,13 @@ class Capability(Protocol):
   """
   @property
   def name(self) -> str: ...
-  
+
   @property
   def description(self) -> str: ...
-  
+
   @property
   def parameters(self) -> dict[str, Any]: ...
-  
-  @property
-  def returns(self) -> dict[str, Any]: ...
-  
+
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any: ...
 
   def to_json_schema(self) -> dict[str, Any]: ...

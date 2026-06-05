@@ -6,12 +6,14 @@ from .context import RunContext
 from .plan import Plan, Step, PlanBuilder, ref
 from .errors import (
   AgentError,
+  CancelledError,
   TransientError,
   SchemaError,
   LogicError,
   SafetyError,
   ResourceError,
   MaxTurnsExceeded,
+  MaxStepsExceeded,
 )
 from .paradigm import (
   ReActAgent,
@@ -36,12 +38,14 @@ __all__ = [
   "PlanBuilder",
   "ref",
   "AgentError",
+  "CancelledError",
   "TransientError",
   "SchemaError",
   "LogicError",
   "SafetyError",
   "ResourceError",
   "MaxTurnsExceeded",
+  "MaxStepsExceeded",
   "ReActAgent",
   "PlanExecutor",
   "ReflectiveAgent",
