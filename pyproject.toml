@@ -10,6 +10,7 @@ requires-python = ">=3.10"
 dependencies = [
     "anyio>=4.13.0",
     "litellm>=1.86.2",
+    "mcp>=1.27.2",
     "mem0ai>=2.0.4",
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",

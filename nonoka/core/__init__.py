@@ -25,6 +25,12 @@ from .paradigm import (
   Actor,
   ToolEvaluator,
 )
+from .prompt import (
+  prompt,
+  PromptTemplate,
+  PartialPromptTemplate,
+  PromptFunction,
+)
 
 __all__ = [
   "Agent",
@@ -56,4 +62,8 @@ __all__ = [
   "Evaluator",
   "Actor",
   "ToolEvaluator",
+  "prompt",
+  "PromptTemplate",
+  "PartialPromptTemplate",
+  "PromptFunction",
 ]

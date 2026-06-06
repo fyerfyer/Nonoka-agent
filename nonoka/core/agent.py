@@ -50,6 +50,10 @@ class Agent(Generic[DepsT, ResultT]):
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 
+  # Metadata for routing, observability, and platform integration
+  metadata: dict[str, Any] = field(default_factory=dict)
+  tags: list[str] = field(default_factory=list)
+
   def __post_init__(self):
     """Expand any ``ToolRegistry`` values in *tools* to plain capabilities."""
     from nonoka.core.registry import ToolRegistry

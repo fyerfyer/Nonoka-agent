@@ -22,6 +22,12 @@ from nonoka.core.paradigm import (
   EvaluationResult,
   ToolEvaluator,
 )
+from nonoka.core.prompt import (
+  prompt,
+  PromptTemplate,
+  PartialPromptTemplate,
+  PromptFunction,
+)
 
 __all__ = [
   "Agent",
@@ -47,6 +53,10 @@ __all__ = [
   "ReflectiveAgent",
   "EvaluationResult",
   "ToolEvaluator",
+  "prompt",
+  "PromptTemplate",
+  "PartialPromptTemplate",
+  "PromptFunction",
 ]
 
 
