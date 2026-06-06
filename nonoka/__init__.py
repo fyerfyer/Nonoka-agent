@@ -28,8 +28,11 @@ from nonoka.core.prompt import (
   PartialPromptTemplate,
   PromptFunction,
 )
+from nonoka.core.config_loader import Config, ConfigLoadError
+from nonoka.core.builder import AgentBuilder, RunnerBuilder
 
 __all__ = [
+  # Core
   "Agent",
   "tool",
   "RunContext",
@@ -57,6 +60,11 @@ __all__ = [
   "PromptTemplate",
   "PartialPromptTemplate",
   "PromptFunction",
+  # Config system (new)
+  "Config",
+  "ConfigLoadError",
+  "AgentBuilder",
+  "RunnerBuilder",
 ]
 
 
@@ -65,4 +73,7 @@ def __getattr__(name: str):
   if name == "Runner":
     from nonoka.core.runner import Runner
     return Runner
+  if name == "ToolRegistry":
+    from nonoka.core.registry import ToolRegistry
+    return ToolRegistry
   raise AttributeError(f"module 'nonoka' has no attribute '{name}'")

@@ -55,6 +55,19 @@ class Runner:
             print(event.data["content"], end="", flush=True)
   """
 
+  @classmethod
+  def from_dict(cls, data: dict[str, Any]) -> "Runner":
+    """Construct a ``Runner`` from a plain dictionary.
+
+    Example::
+
+      runner = Runner.from_dict({
+        "checkpoint": "redis",
+        "memory": "in_memory",
+      })
+    """
+    return cls(**data)
+
   def __init__(
     self,
     checkpoint: str | CheckpointStore | None = "memory",

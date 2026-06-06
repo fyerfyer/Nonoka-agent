@@ -1,12 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "nonoka"
-version = "1.0.0.dev1"
+version = "1.1.0"
 description = "A production-grade, type-safe Python Agent framework"
 authors = [
     {name = "fyerfyer", email = "fyerfyer@126.com"}
 ]
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
+keywords = ["agent", "ai", "llm", "mcp", "orchestration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
     "anyio>=4.13.0",
     "litellm>=1.86.2",
@@ -15,9 +36,16 @@ dependencies = [
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",
     "python-dotenv>=1.2.2",
+    "pyyaml>=6.0",
     "structlog>=25.5.0",
+    "tomli>=2.0.0; python_version<'3.11'",
 ]
 
+[project.urls]
+Homepage = "https://github.com/fyerfyer/nonoka"
+Documentation = "https://github.com/fyerfyer/nonoka#readme"
+Repository = "https://github.com/fyerfyer/nonoka"
+Issues = "https://github.com/fyerfyer/nonoka/issues"
 
 [dependency-groups]
 dev = [

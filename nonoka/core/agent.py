@@ -71,6 +71,101 @@ class Agent(Generic[DepsT, ResultT]):
       # Frozen dataclass — use object.__setattr__ to mutate once during init.
       object.__setattr__(self, "tools", flat_tools)
 
+  # -- Config loading ------------------------------------------------------
+
+  @classmethod
+  def from_dict(cls, data: dict[str, Any]) -> "Agent[DepsT, ResultT]":
+    """Construct an ``Agent`` from a plain dictionary.
+
+    This is the programmatic counterpart to YAML/JSON config files.
+    Tools specified as ``"module:function"`` strings are resolved
+    automatically.
+
+    Args:
+      data: Dictionary with keys matching ``Agent`` field names.
+
+    Example::
+
+      agent = Agent.from_dict({
+        "model": "gpt-4o",
+        "system_prompt": "You are helpful.",
+        "tools": ["my_tools:get_weather"],
+        "max_turns": 20,
+        "metadata": {"category": "weather"},
+      })
+    """
+    from nonoka.core.config_loader import AgentConfig
+    from nonoka.core.tool import tool as make_tool
+
+    data = dict(data)  # shallow copy
+    tools_raw = data.pop("tools", [])
+    resolved_tools = []
+
+    for t in tools_raw:
+      if isinstance(t, str):
+        # Import path — resolve it
+        from nonoka.core.config_loader import resolve_tool_import
+        obj = resolve_tool_import(t)
+        if isinstance(obj, Capability):
+          resolved_tools.append(obj)
+        elif callable(obj):
+          resolved_tools.append(make_tool(obj))
+        else:
+          raise TypeError(
+            f"Tool import '{t}' resolved to {type(obj).__name__}, "
+            "expected a callable or Capability"
+          )
+      elif isinstance(t, Capability):
+        resolved_tools.append(t)
+      elif callable(t):
+        resolved_tools.append(make_tool(t))
+      else:
+        raise TypeError(f"Invalid tool entry: {t!r}")
+
+    # Handle retry as a dict
+    retry_raw = data.pop("default_retry", None)
+    if isinstance(retry_raw, dict):
+      data["default_retry"] = RetryPolicy(**retry_raw)
+
+    return cls(tools=resolved_tools, **data)
+
+  @classmethod
+  def from_yaml(cls, path: str) -> "Agent[DepsT, ResultT]":
+    """Construct an ``Agent`` from a YAML file.
+
+    The YAML should contain a single Agent definition (not the full
+    ``agents:`` dictionary).
+
+    Example YAML::
+
+      model: gpt-4o
+      system_prompt: "You are helpful."
+      tools:
+        - import: my_tools:get_weather
+      max_turns: 20
+    """
+    try:
+      import yaml
+    except ImportError as exc:
+      raise ImportError("PyYAML is required. Install: pip install pyyaml") from exc
+    with open(path, encoding="utf-8") as f:
+      data = yaml.safe_load(f)
+    if not isinstance(data, dict):
+      raise ValueError(f"YAML file must contain a dict, got {type(data).__name__}")
+    return cls.from_dict(data)
+
+  @classmethod
+  def from_json(cls, path: str) -> "Agent[DepsT, ResultT]":
+    """Construct an ``Agent`` from a JSON file."""
+    import json
+    with open(path, encoding="utf-8") as f:
+      data = json.load(f)
+    if not isinstance(data, dict):
+      raise ValueError(f"JSON file must contain a dict, got {type(data).__name__}")
+    return cls.from_dict(data)
+
+  # -- Convenience run -------------------------------------------------------
+
   async def run(
     self,
     prompt: str,
