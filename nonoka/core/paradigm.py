@@ -22,6 +22,7 @@ from nonoka.core.errors import (
   ToolErrorActionType,
 )
 from nonoka.core.scheduler import _resolve_refs
+from nonoka.core.hooks import HookContext
 
 _logger = get_logger("nonoka.paradigm")
 
@@ -102,18 +103,28 @@ class ReActAgent:
         session.check_cancelled()
         session.turn_count = turn + 1
 
-        # Build messages from memory
-        messages = self._build_messages(session)
+        # Build messages from memory (or directly from prompt if no memory)
+        if session.memory is not None:
+          messages = self._build_messages(session)
+        else:
+          messages = []
+          if session.agent.system_prompt:
+            messages.append(LLMMessage(role=LLMMessageRole.SYSTEM, content=session.agent.system_prompt))
+          if prompt:
+            messages.append(LLMMessage(role=LLMMessageRole.USER, content=prompt))
 
         # Convert tools to OpenAI function schema
         tools = [t.to_json_schema() for t in session.agent.tools] if session.agent.tools else None
 
         # --- LLM call ------------------------------------------------
+        hook_ctx = HookContext(session=session, runner=runner)
+        await runner.hooks.emit_llm_request(hook_ctx, messages, tools)
         try:
           response = await runner.llm.chat(
             messages=messages,
             tools=tools or None,
           )
+          await runner.hooks.emit_llm_response(hook_ctx, response)
         except CancelledError:
           raise
         except Exception as exc:
@@ -292,12 +303,25 @@ class ReActAgent:
         session.check_cancelled()
         session.turn_count = turn + 1
 
-        messages = self._build_messages(session)
+        # Build messages from memory (or directly from prompt if no memory)
+        if session.memory is not None:
+          messages = self._build_messages(session)
+        else:
+          messages = []
+          if session.agent.system_prompt:
+            messages.append(LLMMessage(role=LLMMessageRole.SYSTEM, content=session.agent.system_prompt))
+          if prompt:
+            messages.append(LLMMessage(role=LLMMessageRole.USER, content=prompt))
+
         tools = [t.to_json_schema() for t in session.agent.tools] if session.agent.tools else None
 
         # --- Streaming LLM call --------------------------------------
         accumulated_content = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+
+        # Hook: llm request (streaming)
+        hook_ctx = HookContext(session=session, runner=runner)
+        await runner.hooks.emit_llm_request(hook_ctx, messages, tools)
 
         try:
           stream = runner.llm.chat_stream(
@@ -334,6 +358,9 @@ class ReActAgent:
           content=accumulated_content or None,
           tool_calls=tool_calls or None,
         )
+
+        # Hook: llm response (streaming)
+        await runner.hooks.emit_llm_response(hook_ctx, response)
 
         _logger.info(
           "llm.stream_response",
@@ -614,10 +641,16 @@ class ReActAgent:
       data={"tool": name, "arguments": arguments},
     ))
 
+    # Hook: tool start
+    hook_ctx = HookContext(session=session, runner=runner)
+    await runner.hooks.emit_tool_start(hook_ctx, name, arguments)
+
     result: Any = None
+    error: Exception | None = None
     try:
       result = await capability.invoke(ctx, arguments)
     except Exception as exc:
+      error = exc
       action = self.error_policy.on_tool_error(exc, f"{name}_turn_{session.turn_count}")
 
       if action.type == ToolErrorActionType.RETRY:
@@ -626,19 +659,25 @@ class ReActAgent:
         for attempt in range(max_retries):
           try:
             result = await capability.invoke(ctx, arguments)
+            error = None
             break
           except Exception as retry_exc:
             last_exc = retry_exc
+            error = last_exc
             if attempt == max_retries - 1:
               raise last_exc
         else:
           raise last_exc
       elif action.type == ToolErrorActionType.REPORT:
-        return {"error": f"{type(exc).__name__}: {exc}"}
+        result = {"error": f"{type(exc).__name__}: {exc}"}
+        error = None
       elif action.type == ToolErrorActionType.HALT:
         raise SafetyError(f"Halted on tool error: {exc}") from exc
       else:
         raise
+
+    # Hook: tool end
+    await runner.hooks.emit_tool_end(hook_ctx, name, arguments, result, error)
 
     ctx.emit(AgentEvent(
       type=EventType.TOOL_COMPLETED,
@@ -725,6 +764,10 @@ class PlanExecutor:
       session.status = SessionStatus.COMPLETED
       await runner.checkpoint_store.save_session(session.session_id, session.to_state())
       return RunResult(success=True, session=session, data=None)
+
+    # Hook: plan start
+    hook_ctx = HookContext(session=session, runner=runner)
+    await runner.hooks.emit_plan_start(hook_ctx)
 
     sem = asyncio.Semaphore(self.max_concurrency)
 
@@ -844,6 +887,10 @@ class PlanExecutor:
       data={"step_id": step.id, "tool": step.tool},
     ))
 
+    # Hook: plan step start
+    hook_ctx = HookContext(session=session, runner=runner)
+    await runner.hooks.emit_plan_step_start(hook_ctx, step.id, step.tool, resolved_args)
+
     # Determine effective retry / timeout policy
     retry_policy = step.retry if step.retry else session.agent.default_retry
     timeout = step.timeout if step.timeout is not None else session.agent.default_timeout
@@ -865,6 +912,9 @@ class PlanExecutor:
         session.completed_steps[step.id] = StepResult(data=result)
         session.step_statuses[step.id] = StepStatus.COMPLETED
         await runner.checkpoint_store.save_step_result(session.session_id, step.id, result)
+
+        # Hook: plan step end (success)
+        await runner.hooks.emit_plan_step_end(hook_ctx, step.id, step.tool, result, None)
 
         ctx.emit(AgentEvent(
           type=EventType.STEP_COMPLETED,
@@ -889,6 +939,10 @@ class PlanExecutor:
       session.completed_steps[step.id] = StepResult(data=error_result)
       session.step_statuses[step.id] = StepStatus.COMPLETED
       await runner.checkpoint_store.save_step_result(session.session_id, step.id, error_result)
+
+      # Hook: plan step end (error reported)
+      await runner.hooks.emit_plan_step_end(hook_ctx, step.id, step.tool, error_result, last_exc)
+
       ctx.emit(AgentEvent(
         type=EventType.STEP_COMPLETED,
         session_id=session.session_id,
@@ -897,6 +951,8 @@ class PlanExecutor:
       return error_result
 
     if action.type == ToolErrorActionType.HALT:
+      # Hook: plan step end (halted)
+      await runner.hooks.emit_plan_step_end(hook_ctx, step.id, step.tool, None, last_exc)
       raise SafetyError(f"Halted on step error: {last_exc}") from last_exc
 
     # FAIL (default) — raise the exception to fail the plan
@@ -907,6 +963,9 @@ class PlanExecutor:
     session.failed_steps[step.id] = failure
     session.step_statuses[step.id] = StepStatus.FAILED
     await runner.checkpoint_store.save_step_error(session.session_id, step.id, last_exc)
+
+    # Hook: plan step end (failed)
+    await runner.hooks.emit_plan_step_end(hook_ctx, step.id, step.tool, None, last_exc)
 
     ctx.emit(AgentEvent(
       type=EventType.STEP_FAILED,

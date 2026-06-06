@@ -137,10 +137,12 @@ async def test_plan_executor_executes_plan():
   )
   session.current_plan = plan
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = None
+      self.hooks = Hooks()
 
   runner = MockRunner()
   executor = PlanExecutor()
@@ -173,10 +175,12 @@ async def test_plan_executor_ref_resolution():
   )
   session.current_plan = plan
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = None
+      self.hooks = Hooks()
 
   runner = MockRunner()
   executor = PlanExecutor()
@@ -211,10 +215,12 @@ async def test_plan_executor_step_retry_and_failure():
   )
   session.current_plan = plan
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = None
+      self.hooks = Hooks()
 
   runner = MockRunner()
   executor = PlanExecutor()
@@ -244,10 +250,12 @@ async def test_plan_executor_step_timeout():
   )
   session.current_plan = plan
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = None
+      self.hooks = Hooks()
 
   runner = MockRunner()
   executor = PlanExecutor()
@@ -280,10 +288,12 @@ async def test_plan_executor_skips_completed_on_resume():
   session.completed_steps["s1"] = StepResult(data=100)
   session.step_statuses["s1"] = StepStatus.COMPLETED
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = None
+      self.hooks = Hooks()
 
   runner = MockRunner()
   executor = PlanExecutor()
@@ -327,10 +337,12 @@ async def test_react_agent_no_tool_calls():
     {"content": "Final answer"},
   ])
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = mock_llm
+      self.hooks = Hooks()
 
   runner = MockRunner()
   paradigm = ReActAgent()
@@ -373,10 +385,12 @@ async def test_react_agent_tool_call_and_retry():
     {"content": "Done"},
   ])
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = mock_llm
+      self.hooks = Hooks()
 
   runner = MockRunner()
   paradigm = ReActAgent()
@@ -406,10 +420,12 @@ async def test_react_agent_max_turns():
     for i in range(3)
   ])
 
+  from nonoka.core.hooks import Hooks
   class MockRunner:
     def __init__(self):
       self.checkpoint_store = store
       self.llm = mock_llm
+      self.hooks = Hooks()
 
   runner = MockRunner()
   paradigm = ReActAgent()
@@ -434,8 +450,10 @@ async def test_react_agent_run_stream_yields_content_and_final():
   agent = Agent(model="test", tools=[no_op], max_turns=3)
   session = Session(session_id="stream-1", agent=agent)
 
+  from nonoka.core.hooks import Hooks
   runner = MagicMock()
   runner.checkpoint_store = MemoryCheckpointStore()
+  runner.hooks = Hooks()
 
   llm_mock = MagicMock()
 
@@ -472,8 +490,10 @@ async def test_react_agent_returns_cancelled_error_type():
 
   session.cancel()
 
+  from nonoka.core.hooks import Hooks
   runner = MagicMock()
   runner.checkpoint_store = MemoryCheckpointStore()
+  runner.hooks = Hooks()
 
   react = ReActAgent()
   result = await react.run(session, runner, prompt="hello")
@@ -500,8 +520,10 @@ async def test_plan_executor_returns_cancelled_error_type():
     .build()
   )
 
+  from nonoka.core.hooks import Hooks
   runner = MagicMock()
   runner.checkpoint_store = MemoryCheckpointStore()
+  runner.hooks = Hooks()
 
   executor = PlanExecutor()
   result = await executor.execute(plan, session, runner)
@@ -521,8 +543,10 @@ async def test_react_agent_max_turns_error_type():
   agent = Agent(model="test", tools=[], max_turns=0)
   session = Session(session_id="s5", agent=agent)
 
+  from nonoka.core.hooks import Hooks
   runner = MagicMock()
   runner.checkpoint_store = MemoryCheckpointStore()
+  runner.hooks = Hooks()
 
   react = ReActAgent()
   result = await react.run(session, runner, prompt="hello")
@@ -585,8 +609,10 @@ async def test_react_agent_respects_max_concurrency():
   agent = Agent(model="test", tools=[slow_tool])
   session = Session(session_id="s6", agent=agent)
 
+  from nonoka.core.hooks import Hooks
   runner = MagicMock()
   runner.checkpoint_store = MemoryCheckpointStore()
+  runner.hooks = Hooks()
 
   llm_mock = MagicMock()
   llm_mock.chat = AsyncMock(return_value=MagicMock(

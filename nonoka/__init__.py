@@ -5,6 +5,7 @@ from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
 from nonoka.core.types import RunResult, RetryPolicy
 from nonoka.core.plan import Plan, Step, PlanBuilder, ref
+from nonoka.core.hooks import Hooks, HookContext
 from nonoka.core.errors import (
   AgentError,
   TransientError,
@@ -32,6 +33,8 @@ __all__ = [
   "Step",
   "PlanBuilder",
   "ref",
+  "Hooks",
+  "HookContext",
   "AgentError",
   "TransientError",
   "SchemaError",

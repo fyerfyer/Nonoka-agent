@@ -1,3 +1,4 @@
+import weakref
 from typing import Any, Generic, TypeVar, TYPE_CHECKING
 from nonoka.core.event import AgentEvent
 
@@ -53,6 +54,18 @@ class RunContext(Generic[DepsT]):
     etc., but mutating execution state directly is discouraged.
     """
     return self._session
+
+  @property
+  def gateway(self) -> "Any | None":
+    """Gateway bound to this session (for reverse-channel push).
+
+    Returns ``None`` if the session was not created through a Gateway.
+    Use ``if ctx.gateway: await ctx.gateway.send_to(...)`` safely.
+    """
+    ref = getattr(self._session, "_gateway_ref", None)
+    if ref is not None:
+      return ref()
+    return None
 
   # ------------------------------------------------------------------ #
   # Tool helper

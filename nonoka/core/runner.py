@@ -1,6 +1,6 @@
 import uuid
 from collections.abc import AsyncIterator
-from typing import Any, TypeVar, Generic
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -12,6 +12,7 @@ from nonoka.core.checkpoint import CheckpointStore
 from nonoka.core.memory import MemoryBackend
 from nonoka.core.config import settings
 from nonoka.core.llm import LiteLLMProvider, CircuitBreaker
+from nonoka.core.hooks import Hooks, HookContext
 
 DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
@@ -59,6 +60,8 @@ class Runner:
     checkpoint: str | CheckpointStore | None = "memory",
     memory: str | MemoryBackend | None = None,
     circuit_breaker: CircuitBreaker | None = None,
+    hooks: Hooks | None = None,
+    gateway: Any | None = None,
   ):
     # LLM providers are cached per-model and created lazily on first use.
     self._llm_cache: dict[str, LiteLLMProvider] = {}
@@ -71,6 +74,12 @@ class Runner:
 
     # 3. Memory backend
     self.memory_backend = self._resolve_memory(memory)
+
+    # 4. Hooks / middleware
+    self.hooks = hooks or Hooks()
+
+    # 5. Optional Gateway for reverse-channel (Agent-initiated push)
+    self.gateway = gateway
 
   # ------------------------------------------------------------------ #
   # LLM provider cache — created on demand per agent.model
@@ -183,6 +192,11 @@ class Runner:
 
     session = Session(session_id=sid, agent=agent, deps=deps, memory=memory)
 
+    # Bind gateway for reverse-channel push (tools can access ctx.gateway)
+    if self.gateway is not None:
+      import weakref
+      object.__setattr__(session, "_gateway_ref", weakref.ref(self.gateway))
+
     # Inherit memory from parent session if requested
     if parent_session_id is not None:
       await self._inherit_memory(parent_session_id, session)
@@ -237,7 +251,11 @@ class Runner:
     # Ensure LLM is ready for this agent's model
     self._ensure_llm(agent)
     paradigm = ReActAgent()
-    return await paradigm.run(session, self, prompt=prompt)
+    hook_ctx = HookContext(session=session, runner=self)
+    await self.hooks.emit_session_start(hook_ctx)
+    result = await paradigm.run(session, self, prompt=prompt)
+    await self.hooks.emit_session_end(hook_ctx, result)
+    return result
 
   async def run_react_stream(
     self,
@@ -257,8 +275,31 @@ class Runner:
     session = await self._create_session(agent, deps, session_id, parent_session_id)
     self._ensure_llm(agent)
     paradigm = ReActAgent()
-    async for event in paradigm.run_stream(session, self, prompt=prompt):
-      yield event
+    hook_ctx = HookContext(session=session, runner=self)
+    await self.hooks.emit_session_start(hook_ctx)
+    result_data: Any = None
+    result_success = False
+    result_error: str | None = None
+    result_error_type: str | None = None
+    try:
+      async for event in paradigm.run_stream(session, self, prompt=prompt):
+        if event.type == "final":
+          result_data = event.data.get("data")
+          result_success = event.data.get("success", False)
+        elif event.type == "error":
+          result_success = False
+          result_error = event.data.get("error")
+          result_error_type = event.data.get("error_type")
+        yield event
+    finally:
+      result = RunResult(
+        success=result_success,
+        data=result_data,
+        session=session,
+        error=result_error,
+        error_type=result_error_type,
+      )
+      await self.hooks.emit_session_end(hook_ctx, result)
 
   async def run_plan(
     self,
@@ -277,7 +318,11 @@ class Runner:
     session = await self._create_session(agent, deps, session_id, parent_session_id)
     self._ensure_llm(agent)
     executor = PlanExecutor()
-    return await executor.execute(plan, session, self)
+    hook_ctx = HookContext(session=session, runner=self)
+    await self.hooks.emit_session_start(hook_ctx)
+    result = await executor.execute(plan, session, self)
+    await self.hooks.emit_session_end(hook_ctx, result)
+    return result
 
   async def run_reflective(
     self,
@@ -312,7 +357,11 @@ class Runner:
       evaluator=evaluator,
       max_iterations=max_iterations,
     )
-    return await reflective.run(session, self, prompt=prompt)
+    hook_ctx = HookContext(session=session, runner=self)
+    await self.hooks.emit_session_start(hook_ctx)
+    result = await reflective.run(session, self, prompt=prompt)
+    await self.hooks.emit_session_end(hook_ctx, result)
+    return result
 
   # ------------------------------------------------------------------ #
   # Legacy alias — defaults to ReAct

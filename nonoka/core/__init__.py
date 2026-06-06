@@ -4,6 +4,7 @@ from .types import Capability, RetryPolicy, RunResult
 from .registry import ToolRegistry
 from .context import RunContext
 from .plan import Plan, Step, PlanBuilder, ref
+from .hooks import Hooks, HookContext
 from .errors import (
   AgentError,
   CancelledError,
@@ -37,6 +38,8 @@ __all__ = [
   "Step",
   "PlanBuilder",
   "ref",
+  "Hooks",
+  "HookContext",
   "AgentError",
   "CancelledError",
   "TransientError",
