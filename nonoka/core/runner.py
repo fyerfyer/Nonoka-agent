@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any, TypeVar
@@ -195,13 +197,11 @@ class Runner:
     parent_session_id: str | None = None,
   ) -> Session:
     sid = session_id or str(uuid.uuid4())
-    memory = None
-    if self.memory_backend is not None:
-      from nonoka.core.memory import WorkingMemory
-      memory = WorkingMemory(
-        session_id=sid,
-        memory_backend=self.memory_backend,
-      )
+    from nonoka.core.memory import WorkingMemory
+    memory = WorkingMemory(
+      session_id=sid,
+      memory_backend=self.memory_backend,
+    )
 
     session = Session(session_id=sid, agent=agent, deps=deps, memory=memory)
 

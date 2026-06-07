@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 from nonoka.core.memory import MemoryBackend, MemoryEntry, MemoryRole
 

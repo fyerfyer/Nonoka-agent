@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Unified logging utilities for nonoka core.
 
 All core modules should import the logger from here rather than

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Session map for Gateway cross-platform session persistence.
 
@@ -10,9 +12,6 @@ Usage::
     sm.set("telegram:alice", "sess-123")
     session_id = sm.get("telegram:alice")  # "sess-123"
 """
-
-from __future__ import annotations
-
 
 class SessionMap:
   """In-memory session ID mapping.

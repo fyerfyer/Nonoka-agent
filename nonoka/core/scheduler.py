@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Shared execution utilities — ref resolution helpers used by all paradigms.
 

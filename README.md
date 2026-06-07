@@ -33,9 +33,15 @@ import asyncio
 import nonoka
 
 @nonoka.tool
-def get_weather(city: str) -> str:
+async def get_weather(city: str) -> str:
     """Get the weather for a city."""
     return f"Sunny in {city}!"
+
+# Sync functions are also supported
+@nonoka.tool
+def get_time() -> str:
+    """Get the current time."""
+    return "It's noon."
 
 async def main():
     agent = nonoka.Agent(
@@ -56,9 +62,9 @@ Explicit multi-step workflows with type-safe references:
 from nonoka import PlanBuilder, ref
 
 plan = (
-    PlanBuilder()
-    .add_step("research", "Search for information")
-    .add_step("summarize", "Summarize findings", depends_on=[ref("research")])
+    PlanBuilder(objective="Research workflow")
+    .step("research", search_tool, query="Latest AI breakthroughs")
+    .step("summarize", summarize_tool, content=ref("research"))
     .build()
 )
 
@@ -80,8 +86,8 @@ def translate(text: str, target: str = "Chinese") -> str:
     {text}
     """
 
-# Or programmatically
-tpl = PromptTemplate("Summarize this in {style}:\n{content}")
+# Or programmatically with Jinja2 syntax
+tpl = PromptTemplate("Summarize this in {{style}}:\n{{content}}")
 output = tpl.render(style="bullet points", content=long_text)
 ```
 

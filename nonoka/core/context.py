@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import weakref
 from typing import Any, Generic, TypeVar, TYPE_CHECKING
 from nonoka.core.event import AgentEvent

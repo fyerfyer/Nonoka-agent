@@ -35,3 +35,5 @@ uv.lock
 .idea/
 .mypy_cache/
 .ruff_cache/
+
+EVALUATION.md

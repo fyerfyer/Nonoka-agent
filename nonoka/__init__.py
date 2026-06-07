@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Nonoka — Deterministic orchestration meets conversational execution."""
 
 from nonoka.core.agent import Agent

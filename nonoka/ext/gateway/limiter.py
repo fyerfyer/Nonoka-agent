@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Rate limiter for Gateway layer.
 
@@ -9,8 +11,6 @@ Usage::
     limiter = TokenBucketLimiter(default_rate=10, default_burst=20)
     gateway = Gateway(runner=runner, limiter=limiter)
 """
-
-from __future__ import annotations
 
 import asyncio
 from typing import Protocol

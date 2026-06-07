@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from pydantic import BaseModel
 from pydantic import ValidationError
 import inspect
@@ -44,14 +46,13 @@ class Tool(Capability):
   """
   def __init__(
     self,
-    func: Callable[..., Coroutine[Any, Any, Any]],
+    func: Callable[..., Any],
     description: str | None = None,
     default_retry: RetryPolicy | None = None,
     default_timeout: float | None = None,
   ):
-    if not inspect.iscoroutinefunction(func):
-      raise TypeError(f"Tool function must be an async function: {func.__name__}")
     self._func = func
+    self._is_async = inspect.iscoroutinefunction(func)
     self._name = func.__name__
     self._description = description or inspect.getdoc(func) or ""
     self.default_retry = default_retry or RetryPolicy()
@@ -109,7 +110,9 @@ class Tool(Capability):
       except ValidationError as e:
         raise ValueError(f"Tool '{self.name}' arguments validation failed:\n{e}")
 
-    return await self._func(**call_kwargs)
+    if self._is_async:
+      return await self._func(**call_kwargs)
+    return self._func(**call_kwargs)
 
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any:
     # Convert and validate arguments
@@ -125,7 +128,9 @@ class Tool(Capability):
     if self._ctx_param_name:
       kwargs[self._ctx_param_name] = ctx
 
-    return await self._func(**kwargs)
+    if self._is_async:
+      return await self._func(**kwargs)
+    return self._func(**kwargs)
 
   def to_json_schema(self) -> dict[str, Any]:
     """OpenAI-compatible function schema for LLM tool-calling."""

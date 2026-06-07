@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 MCP (Model Context Protocol) Client for Nonoka.
 
@@ -29,8 +31,6 @@ Usage — async context manager (recommended)::
         agent = Agent(model="gpt-4o", tools=mcp.tools)
         result = await runner.run_react(agent, "List files")
 """
-
-from __future__ import annotations
 
 import asyncio
 from contextlib import AsyncExitStack

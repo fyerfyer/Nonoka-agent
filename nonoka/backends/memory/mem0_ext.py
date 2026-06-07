@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from typing import Any
 
 from nonoka.core.logger import get_logger

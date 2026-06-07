@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 from collections.abc import AsyncIterator
 from enum import Enum
@@ -168,6 +170,11 @@ class LiteLLMProvider:
     circuit_breaker: CircuitBreaker | None = None,
     **kwargs: Any,
   ):
+    # LiteLLM needs a provider prefix when a custom base_url is used.
+    # Deepseek via OpenAI-compatible endpoint -> openai/deepseek-chat
+    # Only add prefix if the model string does not already contain one.
+    if base_url and "/" not in model:
+      model = f"openai/{model}"
     self.model = model
     self.api_key = api_key
     self.base_url = base_url

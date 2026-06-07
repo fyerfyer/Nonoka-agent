@@ -46,7 +46,6 @@ Usage — Template composition::
 
 from __future__ import annotations
 
-import asyncio
 import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -122,8 +121,7 @@ class PromptTemplate:
 
   async def render(self, **kwargs: Any) -> str:
     """Asynchronous render (calls render_sync in thread pool)."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, self._template.render, kwargs)
+    return self.render_sync(**kwargs)
 
   def __call__(self, **kwargs: Any) -> str:
     """Shorthand for ``render_sync``."""
@@ -179,8 +177,9 @@ T = TypeVar("T")
 class PromptFunction(Generic[P]):
   """A function wrapped as a prompt template.
 
-  The wrapped function's return value is treated as the prompt text.
-  Supports both sync and async functions.
+  If the function body returns a string, that value is used as the prompt.
+  Otherwise, the function's docstring is treated as a Jinja2 template and
+  rendered with the bound arguments.
   """
 
   def __init__(self, fn: Callable[P, str | Awaitable[str]]):
@@ -189,9 +188,30 @@ class PromptFunction(Generic[P]):
     self.__doc__ = fn.__doc__
     self.__name__ = getattr(fn, "__name__", "prompt")
 
+    # Store docstring for use as a format template
+    self._doc = fn.__doc__ or ""
+
   @property
   def fn(self) -> Callable[P, str | Awaitable[str]]:
     return self._fn
+
+  def _bind_args(self, *args: P.args, **kwargs: P.kwargs) -> dict[str, Any]:
+    """Bind positional + keyword args to parameter names."""
+    sig = inspect.signature(self._fn)
+    bound = sig.bind(*args, **kwargs)
+    bound.apply_defaults()
+    return dict(bound.arguments)
+
+  def _render_template(self, *args: P.args, **kwargs: P.kwargs) -> str:
+    """Render docstring template with bound arguments using str.format()."""
+    if not self._doc:
+      return ""
+    ctx = self._bind_args(*args, **kwargs)
+    try:
+      return self._doc.format(**ctx)
+    except (KeyError, ValueError):
+      # If format fails (e.g. user wants literal braces), return raw docstring
+      return self._doc
 
   def render_sync(self, *args: P.args, **kwargs: P.kwargs) -> str:
     """Render synchronously (only works if the underlying function is sync)."""
@@ -201,21 +221,30 @@ class PromptFunction(Generic[P]):
         "Use 'await ...render(...)' or 'asyncio.run()' instead."
       )
     result = self._fn(*args, **kwargs)
-    assert isinstance(result, str)
-    return result
+    if isinstance(result, str):
+      return result
+    # Fallback: render docstring template
+    return self._render_template(*args, **kwargs)
 
   async def render(self, *args: P.args, **kwargs: P.kwargs) -> str:
     """Render asynchronously (works for both sync and async functions)."""
     if self._is_async:
       result = await self._fn(*args, **kwargs)  # type: ignore[misc]
-      assert isinstance(result, str)
-      return result
+      if isinstance(result, str):
+        return result
+      return self._render_template(*args, **kwargs)
     result = self._fn(*args, **kwargs)
-    assert isinstance(result, str)
-    return result
+    if isinstance(result, str):
+      return result
+    return self._render_template(*args, **kwargs)
 
-  async def __call__(self, *args: P.args, **kwargs: P.kwargs) -> str:
-    return await self.render(*args, **kwargs)
+  def __call__(self, *args: P.args, **kwargs: P.kwargs) -> str:
+    if self._is_async:
+      raise RuntimeError(
+        f"Prompt function '{self.__name__}' is async. "
+        "Use 'await ...render(...)' or 'asyncio.run()' instead."
+      )
+    return self.render_sync(*args, **kwargs)
 
 
 @overload

@@ -1,6 +1,6 @@
-"""Tool import path resolution for declarative configuration."""
-
 from __future__ import annotations
+
+"""Tool import path resolution for declarative configuration."""
 
 from typing import Any
 

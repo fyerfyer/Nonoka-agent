@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from .agent import Agent
 from .tool import tool
 from .types import Capability, RetryPolicy, RunResult

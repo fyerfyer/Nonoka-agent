@@ -1,6 +1,6 @@
-"""Configuration file loading and environment variable substitution."""
-
 from __future__ import annotations
+
+"""Configuration file loading and environment variable substitution."""
 
 import json
 import os

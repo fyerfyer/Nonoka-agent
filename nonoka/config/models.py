@@ -1,6 +1,6 @@
-"""Pydantic models for declarative configuration validation."""
-
 from __future__ import annotations
+
+"""Pydantic models for declarative configuration validation."""
 
 from typing import Any
 

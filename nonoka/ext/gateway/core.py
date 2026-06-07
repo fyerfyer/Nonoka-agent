@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Gateway — Platform access layer for IM platforms.
 
@@ -35,8 +37,6 @@ Agent active push (reverse channel)::
         if ctx.gateway:
             await ctx.gateway.send_to("telegram", "admin_group", f"Alert: {message}")
 """
-
-from __future__ import annotations
 
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable

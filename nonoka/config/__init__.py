@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Declarative configuration for Nonoka.
 
 Supports YAML, JSON, and TOML formats with environment-variable substitution.
