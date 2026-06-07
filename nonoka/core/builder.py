@@ -88,20 +88,9 @@ class AgentBuilder:
 
   def tool_by_import(self, import_path: str) -> AgentBuilder:
     """Add a tool by import path: ``module.submodule:function_name``."""
-    from nonoka.core.config_loader import resolve_tool_import
-    from nonoka.core.tool import tool as make_tool
-    from nonoka.core.types import Capability as CapProtocol
+    from nonoka.config.resolver import _resolve_tool_entry
 
-    obj = resolve_tool_import(import_path)
-    if isinstance(obj, CapProtocol):
-      self._tools.append(obj)
-    elif callable(obj):
-      self._tools.append(make_tool(obj))
-    else:
-      raise TypeError(
-        f"tool_by_import('{import_path}') resolved to {type(obj).__name__}, "
-        "expected a callable or Capability"
-      )
+    self._tools.append(_resolve_tool_entry(import_path))
     return self
 
   # -- Execution policy ------------------------------------------------------

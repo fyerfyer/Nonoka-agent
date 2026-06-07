@@ -28,7 +28,7 @@ from nonoka.core.prompt import (
   PartialPromptTemplate,
   PromptFunction,
 )
-from nonoka.core.config_loader import Config, ConfigLoadError
+from nonoka.config import Config, ConfigLoadError
 from nonoka.core.builder import AgentBuilder, RunnerBuilder
 
 __all__ = [

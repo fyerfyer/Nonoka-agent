@@ -94,17 +94,113 @@ result = await agent.run("What is 42 * the current temperature in Paris?")
 
 ## Configuration
 
-Nonoka integrates with `pydantic-settings` for environment-driven config:
+Nonoka supports three ways to configure agents: **declarative files** (YAML/JSON/TOML), **fluent builders**, and **direct code**.
+
+### Declarative Config (YAML)
+
+Write a `nonoka.yaml` and load it:
+
+```yaml
+# nonoka.yaml
+agents:
+  weather_assistant:
+    model: gpt-4o
+    system_prompt: "You are a weather assistant."
+    max_turns: 10
+    tools:
+      - import: my_tools.weather:get_weather
+
+  code_assistant:
+    model: deepseek-chat
+    system_prompt: "You are a coding assistant."
+
+runner:
+  checkpoint: memory
+  memory: in_memory
+
+defaults:
+  model: deepseek-chat
+  max_turns: 10
+```
 
 ```python
-from pydantic_settings import BaseSettings
+from nonoka import Config
 
-class Settings(BaseSettings):
-    openai_api_key: str
-    default_model: str = "gpt-4o"
+config = Config.load("nonoka.yaml")           # or Config.auto_find()
+agent = config.agents["weather_assistant"].build()
+runner = config.runner.build()
+```
 
-    class Config:
-        env_prefix = "NONOKA_"
+Single-agent shorthand (no `agents:` dict needed):
+
+```yaml
+agent:
+  model: gpt-4o
+  system_prompt: "You are helpful."
+```
+
+```python
+agent = config.agent.build()
+```
+
+### Environment Variables in Config
+
+Use `${VAR}` or `${VAR:-default}` in YAML values:
+
+```yaml
+agent:
+  model: ${NONOKA_MODEL:-gpt-4o}
+  system_prompt: ${NONOKA_PROMPT}
+```
+
+### Fluent Builder API
+
+```python
+from nonoka import AgentBuilder, tool
+
+@tool
+async def get_weather(city: str) -> str:
+    return f"Sunny in {city}!"
+
+agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .system_prompt("You are a weather assistant.")
+    .tool(get_weather)
+    .tool_by_import("my_tools.search:search_city")
+    .max_turns(20)
+    .retry(max_retries=5, backoff=1.5)
+    .metadata(category="weather")
+    .tag("production")
+    .build()
+)
+```
+
+### From Dict / YAML / JSON
+
+```python
+from nonoka import Agent
+
+# From dict
+agent = Agent.from_dict({
+    "model": "gpt-4o",
+    "tools": ["my_tools:get_weather"],
+})
+
+# From file
+agent = Agent.from_yaml("agent.yaml")
+agent = Agent.from_json("agent.json")
+```
+
+### Environment-driven Settings
+
+Nonoka also integrates with `pydantic-settings` for framework-level config:
+
+```python
+from nonoka.core.config import settings
+
+print(settings.default_model)   # from NONOKA_DEFAULT_MODEL env var
+print(settings.openai_api_key)  # from NONOKA_OPENAI_API_KEY env var
 ```
 
 ## Requirements

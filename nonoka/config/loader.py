@@ -1,7 +1,4 @@
-"""Declarative configuration loader for Nonoka.
-
-Supports YAML, JSON, and TOML formats with environment-variable substitution.
-"""
+"""Configuration file loading and environment variable substitution."""
 
 from __future__ import annotations
 
@@ -10,11 +7,16 @@ import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, TypeVar
-
-from pydantic import BaseModel, Field, field_validator, model_validator
+from typing import Any
 
 from nonoka.core.types import RetryPolicy
+from nonoka.config.models import (
+  AgentConfigModel,
+  ConfigFileModel,
+  DefaultsConfigModel,
+  RunnerConfigModel,
+)
+from nonoka.config.resolver import ConfigLoadError, _resolve_tool_entry
 
 
 # --------------------------------------------------------------------------- #
@@ -47,136 +49,7 @@ def _substitute_env_vars(value: Any) -> Any:
 
 
 # --------------------------------------------------------------------------- #
-# Tool import path resolution
-# --------------------------------------------------------------------------- #
-
-def resolve_tool_import(import_path: str) -> Any:
-  """Resolve ``module.submodule:function_name`` to a callable.
-
-  Examples:
-    ``my_tools.weather:get_weather`` → imports ``my_tools.weather``,
-    then retrieves ``get_weather`` attribute.
-  """
-  if ":" not in import_path:
-    raise ConfigLoadError(
-      f"Invalid tool import path '{import_path}'. Expected format: "
-      "'module.submodule:function_name'"
-    )
-  module_path, attr_path = import_path.split(":", 1)
-  try:
-    import importlib
-    module = importlib.import_module(module_path)
-  except ImportError as exc:
-    raise ConfigLoadError(
-      f"Cannot import module '{module_path}' for tool '{import_path}': {exc}"
-    ) from exc
-
-  obj = module
-  for attr in attr_path.split("."):
-    obj = getattr(obj, attr, None)
-    if obj is None:
-      raise ConfigLoadError(
-        f"Cannot find attribute '{attr}' in module '{module_path}' "
-        f"for tool '{import_path}'"
-      )
-  return obj
-
-
-# --------------------------------------------------------------------------- #
-# Config error
-# --------------------------------------------------------------------------- #
-
-class ConfigLoadError(Exception):
-  """Raised when a configuration file cannot be loaded or is invalid."""
-
-
-# --------------------------------------------------------------------------- #
-# Pydantic models for validation
-# --------------------------------------------------------------------------- #
-
-class RetryConfig(BaseModel):
-  """Retry policy configuration."""
-  max_retries: int = 3
-  backoff: float = 2.0
-
-  def to_retry_policy(self) -> RetryPolicy:
-    return RetryPolicy(max_retries=self.max_retries, backoff=self.backoff)
-
-
-class ToolImportConfig(BaseModel):
-  """Tool specified by import path."""
-  import_: str = Field(..., alias="import")
-
-  @field_validator("import_")
-  @classmethod
-  def validate_import_path(cls, v: str) -> str:
-    if ":" not in v:
-      raise ValueError(
-        f"Tool import path must be 'module:function_name', got: {v}"
-      )
-    return v
-
-
-class AgentConfigModel(BaseModel):
-  """Pydantic model for validating a single Agent configuration."""
-  model: str | None = None
-  system_prompt: str = ""
-  tools: list[str | dict[str, Any]] = Field(default_factory=list)
-  max_turns: int | None = None
-  max_steps: int | None = None
-  max_concurrency: int | None = None
-  default_retry: RetryConfig | None = None
-  default_timeout: float | None = None
-  metadata: dict[str, Any] = Field(default_factory=dict)
-  tags: list[str] = Field(default_factory=list)
-
-  @model_validator(mode="after")
-  def normalize_tools(self) -> AgentConfigModel:
-    """Normalize tools to list of import strings."""
-    normalized: list[str] = []
-    for t in self.tools:
-      if isinstance(t, str):
-        normalized.append(t)
-      elif isinstance(t, dict):
-        if "import" in t:
-          normalized.append(t["import"])
-        else:
-          raise ValueError(f"Tool entry must have 'import' key or be a string: {t}")
-      else:
-        raise ValueError(f"Invalid tool entry type: {type(t)}")
-    self.tools = normalized
-    return self
-
-
-class RunnerConfigModel(BaseModel):
-  """Pydantic model for validating Runner configuration."""
-  checkpoint: str | None = "memory"
-  memory: str | None = None
-
-
-class DefaultsConfigModel(BaseModel):
-  """Default values shared across agents."""
-  model: str | None = None
-  system_prompt: str | None = None
-  max_turns: int | None = None
-  max_steps: int | None = None
-  max_concurrency: int | None = None
-  default_retry: RetryConfig | None = None
-  default_timeout: float | None = None
-  metadata: dict[str, Any] | None = None
-  tags: list[str] | None = None
-
-
-class ConfigFileModel(BaseModel):
-  """Top-level configuration file model."""
-  agents: dict[str, AgentConfigModel] | None = None
-  agent: AgentConfigModel | None = None
-  runner: RunnerConfigModel | None = None
-  defaults: DefaultsConfigModel | None = None
-
-
-# --------------------------------------------------------------------------- #
-# Agent / Runner config dataclasses (for programmatic use)
+# Agent / Runner config dataclasses
 # --------------------------------------------------------------------------- #
 
 @dataclass
@@ -199,22 +72,8 @@ class AgentConfig:
     Tools are resolved from import paths at build time.
     """
     from nonoka.core.agent import Agent
-    from nonoka.core.tool import tool as make_tool
 
-    resolved_tools = []
-    for import_path in self.tools:
-      obj = resolve_tool_import(import_path)
-      # If already a Capability, use directly; otherwise wrap with @tool
-      from nonoka.core.types import Capability
-      if isinstance(obj, Capability):
-        resolved_tools.append(obj)
-      elif callable(obj):
-        resolved_tools.append(make_tool(obj))
-      else:
-        raise ConfigLoadError(
-          f"Tool import '{import_path}' resolved to {type(obj).__name__}, "
-          "expected a callable or Capability"
-        )
+    resolved_tools = [_resolve_tool_entry(path) for path in self.tools]
 
     kwargs: dict[str, Any] = {
       "tools": resolved_tools,
@@ -386,7 +245,6 @@ class Config:
     agents: dict[str, AgentConfig] = {}
     single_agent: AgentConfig | None = None
 
-    # Build defaults dict for merging
     def _merge_with_defaults(agent_model: AgentConfigModel) -> AgentConfig:
       return AgentConfig(
         model=agent_model.model or (defaults.model if defaults else None),

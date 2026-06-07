@@ -94,33 +94,11 @@ class Agent(Generic[DepsT, ResultT]):
         "metadata": {"category": "weather"},
       })
     """
-    from nonoka.core.config_loader import AgentConfig
-    from nonoka.core.tool import tool as make_tool
+    from nonoka.config.resolver import _resolve_tool_entry
 
     data = dict(data)  # shallow copy
     tools_raw = data.pop("tools", [])
-    resolved_tools = []
-
-    for t in tools_raw:
-      if isinstance(t, str):
-        # Import path — resolve it
-        from nonoka.core.config_loader import resolve_tool_import
-        obj = resolve_tool_import(t)
-        if isinstance(obj, Capability):
-          resolved_tools.append(obj)
-        elif callable(obj):
-          resolved_tools.append(make_tool(obj))
-        else:
-          raise TypeError(
-            f"Tool import '{t}' resolved to {type(obj).__name__}, "
-            "expected a callable or Capability"
-          )
-      elif isinstance(t, Capability):
-        resolved_tools.append(t)
-      elif callable(t):
-        resolved_tools.append(make_tool(t))
-      else:
-        raise TypeError(f"Invalid tool entry: {t!r}")
+    resolved_tools = [_resolve_tool_entry(t) for t in tools_raw]
 
     # Handle retry as a dict
     retry_raw = data.pop("default_retry", None)

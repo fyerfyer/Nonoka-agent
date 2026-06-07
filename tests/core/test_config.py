@@ -10,7 +10,7 @@ import yaml
 
 from nonoka.core.agent import Agent
 from nonoka.core.builder import AgentBuilder, RunnerBuilder
-from nonoka.core.config_loader import (
+from nonoka.config import (
   Config,
   ConfigLoadError,
   resolve_tool_import,
