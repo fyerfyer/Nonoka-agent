@@ -83,3 +83,90 @@ async def test_runner_run_react_stream_returns_events():
 
   assert len(events) >= 1
   assert events[-1].type == "final"
+
+
+# --------------------------------------------------------------------------- #
+# Session memory recovery on resume (Bug fix: P0)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_create_session_restores_memory_entries_from_checkpoint():
+  """When session_id exists in checkpoint store, memory entries should be restored."""
+  runner = Runner()
+  agent = Agent(model="test", tools=[])
+
+  # First, create a session and populate its memory
+  session1 = await runner._create_session(agent, deps=None)
+  assert session1.memory is not None
+  from nonoka.core.memory import MemoryRole
+  await session1.memory.add("Hello", MemoryRole.USER)
+  await session1.memory.add("Hi there", MemoryRole.ASSISTANT)
+
+  # Save to checkpoint
+  await runner.checkpoint_store.save_session(session1.session_id, session1.to_state())
+
+  # Now create a new session with the same ID — memory should be restored
+  session2 = await runner._create_session(agent, deps=None, session_id=session1.session_id)
+  assert session2.memory is not None
+  assert len(session2.memory.entries) == 2
+  assert session2.memory.entries[0].content == "Hello"
+  assert session2.memory.entries[0].role == MemoryRole.USER
+  assert session2.memory.entries[1].content == "Hi there"
+  assert session2.memory.entries[1].role == MemoryRole.ASSISTANT
+
+
+@pytest.mark.asyncio
+async def test_create_session_with_unknown_session_id_creates_fresh_memory():
+  """When session_id is not found in checkpoint, a fresh WorkingMemory is created."""
+  runner = Runner()
+  agent = Agent(model="test", tools=[])
+
+  session = await runner._create_session(agent, deps=None, session_id="never-seen-before")
+  assert session.memory is not None
+  assert len(session.memory.entries) == 0
+
+
+@pytest.mark.asyncio
+async def test_create_session_restores_memory_entries_from_checkpoint_with_role():
+  """Memory entries with different roles are restored correctly."""
+  runner = Runner()
+  agent = Agent(model="test", tools=[])
+
+  session1 = await runner._create_session(agent, deps=None)
+  from nonoka.core.memory import MemoryRole
+  await session1.memory.add("System prompt", MemoryRole.SYSTEM)
+  await session1.memory.add("User query", MemoryRole.USER)
+  await session1.memory.add("Tool result", MemoryRole.TOOL)
+
+  await runner.checkpoint_store.save_session(session1.session_id, session1.to_state())
+
+  session2 = await runner._create_session(agent, deps=None, session_id=session1.session_id)
+  assert len(session2.memory.entries) == 3
+  roles = [e.role for e in session2.memory.entries]
+  assert roles == [MemoryRole.SYSTEM, MemoryRole.USER, MemoryRole.TOOL]
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_memory_entries():
+  """Resume() should restore memory entries from checkpoint."""
+  from nonoka.backends.memory.in_memory import InMemoryBackend
+  runner = Runner(memory=InMemoryBackend())
+  agent = Agent(model="test", tools=[])
+
+  session1 = await runner._create_session(agent, deps=None)
+  from nonoka.core.memory import MemoryRole
+  await session1.memory.add("Previous context", MemoryRole.USER)
+  await session1.memory.add("Assistant response", MemoryRole.ASSISTANT)
+
+  # Manually set status to PAUSED so resume doesn't early-return
+  from nonoka.core.session import SessionStatus
+  session1.status = SessionStatus.PAUSED
+  await runner.checkpoint_store.save_session(session1.session_id, session1.to_state())
+
+  # Resume — resume() needs a memory_backend to create WorkingMemory
+  result = await runner.resume(agent, session_id=session1.session_id, deps=None)
+  assert result.session is not None
+  assert result.session.memory is not None
+  assert len(result.session.memory.entries) == 2
+  assert result.session.memory.entries[0].content == "Previous context"
+  assert result.session.memory.entries[1].content == "Assistant response"

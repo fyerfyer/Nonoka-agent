@@ -57,21 +57,28 @@ class Agent(Generic[DepsT, ResultT]):
   tags: list[str] = field(default_factory=list)
 
   def __post_init__(self):
-    """Expand any ``ToolRegistry`` values in *tools* to plain capabilities."""
+    """Expand any ``ToolRegistry`` values in *tools* to plain capabilities.
+
+    When a ``ToolRegistry`` is present the resulting ``tools`` field is
+    replaced by a ``ToolListProxy`` so that additions / removals in the
+    registry are visible to running Agents without reconstructing them.
+    """
     from nonoka.core.registry import ToolRegistry
+    from nonoka.core.hot_reload import ToolListProxy
 
     flat_tools: list[Capability] = []
-    has_registry = False
+    registries: list[ToolRegistry] = []
     for item in self.tools if not isinstance(self.tools, ToolRegistry) else [self.tools]:
       if isinstance(item, ToolRegistry):
-        has_registry = True
-        flat_tools.extend(item.get_all())
+        registries.append(item)
       else:
         flat_tools.append(item)
 
-    if has_registry or isinstance(self.tools, ToolRegistry):
-      # Frozen dataclass — use object.__setattr__ to mutate once during init.
-      object.__setattr__(self, "tools", flat_tools)
+    if registries:
+      # Use a proxy so the registry can be mutated at runtime (hot reload)
+      proxy = ToolListProxy(flat_tools, registries)
+      object.__setattr__(self, "tools", proxy)
+    # If no registries were provided leave *tools* exactly as-is.
 
   # -- Config loading ------------------------------------------------------
 

@@ -203,6 +203,13 @@ class Runner:
       memory_backend=self.memory_backend,
     )
 
+    # If resuming an existing session, restore memory entries from checkpoint
+    if session_id is not None:
+      state = await self.checkpoint_store.load_session(session_id)
+      if state is not None and state.memory_entries:
+        from nonoka.core.memory import MemoryEntry
+        memory.entries = [MemoryEntry(**entry) for entry in state.memory_entries]
+
     session = Session(session_id=sid, agent=agent, deps=deps, memory=memory)
 
     # Bind gateway for reverse-channel push (tools can access ctx.gateway)

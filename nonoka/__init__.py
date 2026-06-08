@@ -67,6 +67,8 @@ __all__ = [
   "ConfigLoadError",
   "AgentBuilder",
   "RunnerBuilder",
+  # Hot reload
+  "PluginManager",
 ]
 
 
@@ -78,4 +80,7 @@ def __getattr__(name: str):
   if name == "ToolRegistry":
     from nonoka.core.registry import ToolRegistry
     return ToolRegistry
+  if name == "PluginManager":
+    from nonoka.core.hot_reload import PluginManager
+    return PluginManager
   raise AttributeError(f"module 'nonoka' has no attribute '{name}'")

@@ -44,6 +44,12 @@ def _resolve_path(data: Any, path: str) -> Any:
         current = current[part]
       except KeyError:
         return None
+    elif isinstance(current, list):
+      try:
+        idx = int(part)
+        current = current[idx]
+      except (ValueError, IndexError):
+        return None
     else:
       current = getattr(current, part, None)
   return current

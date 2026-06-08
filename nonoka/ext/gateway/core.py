@@ -149,6 +149,10 @@ class Gateway:
     self.adapters: dict[str, GatewayAdapter] = {}
     self._limiter = limiter
 
+    # Ensure the runner knows about this gateway so sessions are bound
+    # correctly and tools can access ctx.gateway via RunContext.
+    runner.gateway = self
+
     # Cross-platform session mapping: (platform, sender) -> session_id
     from nonoka.ext.gateway.session_map import SessionMap
     self._session_map = SessionMap()

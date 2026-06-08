@@ -682,3 +682,153 @@ async def test_tool_evaluator_no_session():
 
   assert eval_result.passed is False
   assert "No session available" in eval_result.feedback
+
+
+# --------------------------------------------------------------------------- #
+# Ref list index resolution (Bug fix: P0)
+# --------------------------------------------------------------------------- #
+
+def test_resolve_path_list_index():
+  """_resolve_path should support numeric string as list index: users.0"""
+  data = {"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}
+  assert _resolve_path(data, "users.0") == {"id": 1, "name": "Alice"}
+  assert _resolve_path(data, "users.1") == {"id": 2, "name": "Bob"}
+
+
+def test_resolve_path_list_index_nested():
+  """_resolve_path should support mixed dict+list path: users.0.name"""
+  data = {"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}
+  assert _resolve_path(data, "users.0.name") == "Alice"
+  assert _resolve_path(data, "users.1.name") == "Bob"
+
+
+def test_resolve_path_list_index_out_of_bounds():
+  """_resolve_path should return None for out-of-bounds list index."""
+  data = {"users": [{"name": "Alice"}]}
+  assert _resolve_path(data, "users.5") is None
+
+
+def test_resolve_path_dict_key_that_looks_like_number():
+  """Numeric string should still work as dict key when value is a dict."""
+  data = {"0": "zero", "1": "one"}
+  assert _resolve_path(data, "0") == "zero"
+  assert _resolve_path(data, "1") == "one"
+
+
+def test_resolve_path_list_of_primitives():
+  """_resolve_path should work with lists of primitives."""
+  data = {"scores": [100, 95, 87]}
+  assert _resolve_path(data, "scores.0") == 100
+  assert _resolve_path(data, "scores.2") == 87
+
+
+def test_resolve_path_deeply_nested_list():
+  """_resolve_path should handle deeply nested list access."""
+  data = {"matrix": [[1, 2], [3, 4]]}
+  assert _resolve_path(data, "matrix.0") == [1, 2]
+  assert _resolve_path(data, "matrix.0.1") == 2
+  assert _resolve_path(data, "matrix.1.0") == 3
+
+
+def test_resolve_path_non_numeric_string_on_list():
+  """Non-numeric string on a list should return None."""
+  data = {"users": [{"name": "Alice"}]}
+  assert _resolve_path(data, "users.name") is None
+
+
+def test_resolve_refs_with_list_index():
+  """Ref should resolve list indices in completed step data."""
+  completed = {
+    "fetch": StepResult(data={"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}),
+  }
+  args = {"user": Ref("fetch", "users.0")}
+  resolved = _resolve_refs(args, completed)
+  assert resolved["user"] == {"id": 1, "name": "Alice"}
+
+
+def test_resolve_refs_with_list_index_nested():
+  """Ref should resolve nested list+dict paths."""
+  completed = {
+    "fetch": StepResult(data={"users": [{"id": 1, "name": "Alice"}]}),
+  }
+  args = {"name": Ref("fetch", "users.0.name")}
+  resolved = _resolve_refs(args, completed)
+  assert resolved["name"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_ref_list_index():
+  """PlanExecutor should resolve ref with list index in real execution."""
+  @tool
+  async def get_users(ctx: RunContext) -> dict:
+    return {"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}
+
+  @tool
+  async def greet_user(ctx: RunContext, name: str) -> str:
+    return f"Hello, {name}!"
+
+  agent = Agent(model="test", tools=[get_users, greet_user])
+  session = Session(session_id="test", agent=agent, deps=None)
+  store = MemoryCheckpointStore()
+
+  plan = Plan(
+    objective="Get user and greet",
+    steps=(
+      Step(id="fetch", tool="get_users"),
+      Step(id="greet", tool="greet_user", args={"name": ref("fetch", "users.0.name")}, depends_on=frozenset({"fetch"})),
+    ),
+  )
+  session.current_plan = plan
+
+  from nonoka.core.hooks import Hooks
+  class MockRunner:
+    def __init__(self):
+      self.checkpoint_store = store
+      self.llm = None
+      self.hooks = Hooks()
+
+  runner = MockRunner()
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
+
+  assert result.success is True
+  assert session.completed_steps["greet"].data == "Hello, Alice!"
+
+
+@pytest.mark.asyncio
+async def test_plan_executor_ref_list_index_second_element():
+  """PlanExecutor should resolve ref accessing second list element."""
+  @tool
+  async def get_data(ctx: RunContext) -> dict:
+    return {"items": ["first", "second", "third"]}
+
+  @tool
+  async def process(ctx: RunContext, item: str) -> str:
+    return f"processed:{item}"
+
+  agent = Agent(model="test", tools=[get_data, process])
+  session = Session(session_id="test", agent=agent, deps=None)
+  store = MemoryCheckpointStore()
+
+  plan = Plan(
+    objective="Get second item",
+    steps=(
+      Step(id="fetch", tool="get_data"),
+      Step(id="proc", tool="process", args={"item": ref("fetch", "items.1")}, depends_on=frozenset({"fetch"})),
+    ),
+  )
+  session.current_plan = plan
+
+  from nonoka.core.hooks import Hooks
+  class MockRunner:
+    def __init__(self):
+      self.checkpoint_store = store
+      self.llm = None
+      self.hooks = Hooks()
+
+  runner = MockRunner()
+  executor = PlanExecutor()
+  result = await executor.execute(plan, session, runner)
+
+  assert result.success is True
+  assert session.completed_steps["proc"].data == "processed:second"

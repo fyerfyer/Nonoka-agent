@@ -196,15 +196,24 @@ async def test_gateway_processes_message_and_sends_response():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
+async def test_gateway_auto_binds_to_runner():
+  """Gateway.__init__ should automatically set runner.gateway = self."""
+  runner = Runner()
+  assert runner.gateway is None
+
+  gateway = Gateway(runner)
+  assert runner.gateway is gateway
+
+
+@pytest.mark.asyncio
 async def test_gateway_bound_to_session_via_runner():
+  """When Gateway is created, _create_session should auto-bind _gateway_ref."""
   runner = Runner()
   gateway = Gateway(runner)
   adapter = MockAdapter("telegram")
   gateway.register_adapter(adapter)
 
-  # Bind gateway to runner
-  runner.gateway = gateway
-
+  # Gateway auto-binds to runner — no manual runner.gateway = gateway needed
   agent = Agent(model="test", tools=[])
   session = await runner._create_session(agent, deps=None)
 
@@ -214,11 +223,100 @@ async def test_gateway_bound_to_session_via_runner():
 
 @pytest.mark.asyncio
 async def test_runcontext_gateway_is_none_without_gateway():
+  """When no Gateway is attached to runner, ctx.gateway should be None."""
   runner = Runner()
   agent = Agent(model="test", tools=[])
   session = await runner._create_session(agent, deps=None)
 
   ctx = RunContext(session)
+  assert ctx.gateway is None
+
+
+@pytest.mark.asyncio
+async def test_gateway_tool_can_access_ctx_gateway():
+  """Tool invoked via Gateway._process_message should be able to use ctx.gateway.send_to."""
+  runner = Runner()
+  gateway = Gateway(runner)
+  adapter = MockAdapter("telegram")
+  gateway.register_adapter(adapter)
+  await gateway.start()
+
+  # Track whether the tool successfully used ctx.gateway
+  tool_called = False
+  tool_sent_via_gateway = False
+
+  @tool
+  async def notify_admin(ctx: RunContext, message: str) -> str:
+    nonlocal tool_called, tool_sent_via_gateway
+    tool_called = True
+    if ctx.gateway is not None:
+      await ctx.gateway.send_to("telegram", "admin-chat", f"ALERT: {message}")
+      tool_sent_via_gateway = True
+      return "sent"
+    return "no gateway"
+
+  agent = Agent(model="test", tools=[notify_admin])
+  gateway.set_default_agent(agent)
+
+  # Mock LLM so it calls the tool
+  from nonoka.core.llm import LLMResponse
+  fake_response_tool = LLMResponse(
+    content=None,
+    tool_calls=[{
+      "id": "tc1",
+      "function": {
+        "name": "notify_admin",
+        "arguments": '{"message": "disk full"}',
+      },
+    }],
+  )
+  fake_response_final = LLMResponse(content="Done")
+
+  provider = MagicMock()
+  provider.chat = AsyncMock(side_effect=[fake_response_tool, fake_response_final])
+  provider.retry_policy = MagicMock(max_retries=0, backoff=0)
+  runner._llm_cache["test"] = provider
+  runner.llm = provider
+
+  msg = GatewayMessage(
+    message_id="msg-1",
+    sender="alice",
+    platform="telegram",
+    chat_id="chat-1",
+    content="Alert admin that disk is full",
+  )
+  await adapter.inject(msg)
+
+  assert tool_called is True, "Tool should have been called"
+  assert tool_sent_via_gateway is True, "Tool should have successfully used ctx.gateway"
+  # Verify the reverse channel message was sent
+  admin_messages = [s for s in adapter.sent if s[0] == "admin-chat"]
+  assert len(admin_messages) >= 1
+  assert "disk full" in admin_messages[0][1]
+
+
+@pytest.mark.asyncio
+async def test_gateway_weakref_cleared_when_gateway_deleted():
+  """When Gateway is garbage-collected, ctx.gateway should return None."""
+  runner = Runner()
+  gateway = Gateway(runner)
+  adapter = MockAdapter("telegram")
+  gateway.register_adapter(adapter)
+
+  agent = Agent(model="test", tools=[])
+  session = await runner._create_session(agent, deps=None)
+
+  ctx = RunContext(session)
+  assert ctx.gateway is gateway
+
+  # Simulate gateway being garbage-collected (e.g., restarted).
+  # Must clear runner.gateway first since it holds a strong reference.
+  import gc
+  runner.gateway = None
+  del gateway
+  gc.collect()
+
+  # Weak reference should now return None
   assert ctx.gateway is None
 
 
