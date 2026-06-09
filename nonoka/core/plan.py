@@ -4,14 +4,16 @@ from dataclasses import dataclass, field
 from typing import FrozenSet, Any
 from collections.abc import Callable
 
+from pydantic import BaseModel
+
 from nonoka.core.types import RetryPolicy
 
 
-class Ref:
+class Ref(BaseModel):
   """Reference marker used in PlanBuilder step arguments.
 
   At build time ``Ref`` is just a placeholder.  At execution time the
-  DAGScheduler resolves it to the actual value from a previously completed
+  PlanExecutor resolves it to the actual value from a previously completed
   step.
 
   Example::
@@ -19,20 +21,13 @@ class Ref:
       .step("analyze", analyze_deps, repo=ref("fetch", "result"))
   """
 
-  def __init__(self, step_id: str, path: str = ""):
-    self.step_id = step_id
-    self.path = path
+  model_config = {"frozen": True}
+
+  step_id: str
+  path: str = ""
 
   def __repr__(self) -> str:  # pragma: no cover
     return f"ref({self.step_id!r}, {self.path!r})"
-
-  def __eq__(self, other: object) -> bool:
-    if not isinstance(other, Ref):
-      return NotImplemented
-    return self.step_id == other.step_id and self.path == other.path
-
-  def __hash__(self) -> int:
-    return hash((self.step_id, self.path))
 
 
 def ref(step_id: str, path: str | None = None) -> Ref:
@@ -55,13 +50,13 @@ def ref(step_id: str, path: str | None = None) -> Ref:
       ``"users[0].id"`` are supported.
   """
   if path is not None:
-    return Ref(step_id, path)
+    return Ref(step_id=step_id, path=path)
 
   if "." in step_id:
     parts = step_id.split(".", 1)
-    return Ref(parts[0], parts[1])
+    return Ref(step_id=parts[0], path=parts[1])
 
-  return Ref(step_id, "")
+  return Ref(step_id=step_id, path="")
 
 
 @dataclass(frozen=True)

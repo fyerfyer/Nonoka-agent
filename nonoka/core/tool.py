@@ -115,6 +115,8 @@ class Tool(Capability):
     return self._func(**call_kwargs)
 
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any:
+    from nonoka.core.tool_response import unwrap_tool_response
+
     # Convert and validate arguments
     if self._params_model:
       try:
@@ -129,8 +131,13 @@ class Tool(Capability):
       kwargs[self._ctx_param_name] = ctx
 
     if self._is_async:
-      return await self._func(**kwargs)
-    return self._func(**kwargs)
+      result = await self._func(**kwargs)
+    else:
+      result = self._func(**kwargs)
+
+    # Normalise return value so the LLM always sees a consistent shape.
+    # ToolResponse -> expanded dict; plain value -> {"result": value, "has_more": false}
+    return unwrap_tool_response(result)
 
   def to_json_schema(self) -> dict[str, Any]:
     """OpenAI-compatible function schema for LLM tool-calling."""

@@ -175,9 +175,13 @@ async def test_plan_hooks_with_real_llm(real_runner):
   print(f"\n[Plan hooks events]: {events}")
   assert "plan_start" in events
   assert ("step_start", "s1") in events
-  assert any(e[0] == "step_end" and e[1] == "s1" and e[2] == 42 for e in events)
+  # Tool results are now normalised to standard shape
+  assert any(
+    e[0] == "step_end" and e[1] == "s1" and isinstance(e[2], dict) and e[2].get("result") == 42
+    for e in events
+  )
   assert result.success is True
-  assert result.data == 42
+  assert isinstance(result.data, dict) and result.data.get("result") == 42
 
 
 @pytest.mark.asyncio

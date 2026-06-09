@@ -25,6 +25,7 @@ from nonoka.core.errors import (
 )
 from nonoka.core.scheduler import _resolve_refs
 from nonoka.core.hooks import HookContext
+from nonoka.core.tool_response import unwrap_tool_response
 
 _logger = get_logger("nonoka.paradigm")
 
@@ -73,11 +74,16 @@ class ReActAgent:
     output_mode: str = "content",
     data_extractor: Any | None = None,
     max_concurrency: int | None = None,
+    max_repeated_tool_calls: int = 3,
+    loop_similarity_threshold: int = 3,
   ):
     self.error_policy = error_policy or ErrorPolicy()
     self.output_mode = output_mode
     self.data_extractor = data_extractor
     self.max_concurrency = max_concurrency
+    # Loop detection configuration
+    self.max_repeated_tool_calls = max_repeated_tool_calls
+    self.loop_similarity_threshold = loop_similarity_threshold
 
   async def run(
     self,
@@ -116,7 +122,13 @@ class ReActAgent:
             messages.append(LLMMessage(role=LLMMessageRole.USER, content=prompt))
 
         # Convert tools to OpenAI function schema
-        tools = [t.to_json_schema() for t in session.agent.tools] if session.agent.tools else None
+        # Filter out temporarily blocked tools (loop detection escalation)
+        blocked = getattr(session, "_blocked_tools", set())
+        available_tools = [
+          t for t in session.agent.tools
+          if t.name not in blocked
+        ] if session.agent.tools else []
+        tools = [t.to_json_schema() for t in available_tools] if available_tools else None
 
         # --- LLM call ------------------------------------------------
         hook_ctx = HookContext(session=session, runner=runner)
@@ -202,9 +214,15 @@ class ReActAgent:
             break
         session._last_tool_result = last_tool_result  # type: ignore[attr-defined]
 
-        # Add observations to memory
+        # Add tool observations to memory.  SYSTEM guidance is injected
+        # *after* all TOOL entries so that ASSISTANT+tool_calls messages stay
+        # contiguous with their corresponding TOOL responses (required by
+        # OpenAI / DeepSeek API).
+        tool_guidance: list[str] = []
+        has_more_notices: list[str] = []
         for tc, tr in zip(response.tool_calls, tool_results):
           tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+          func_name = tc.get("function", {}).get("name", "")
           if isinstance(tr, Exception):
             obs_text = f"Error: {type(tr).__name__}: {tr}"
           else:
@@ -215,7 +233,39 @@ class ReActAgent:
               obs_text,
               MemoryRole.TOOL,
               tool_call_id=tc_id,
+              tool_name=func_name,
             )
+
+            # Collect ToolResponse metadata to inject after all tool messages
+            if isinstance(tr, dict):
+              suggested = tr.get("suggested_next_step")
+              if suggested:
+                tool_guidance.append(f"[Tool guidance] {suggested}")
+
+              if tr.get("has_more") is False:
+                has_more_notices.append(
+                  f"[System notice] {func_name or 'the tool'} returned 'has_more': false — "
+                  "there is no additional data available."
+                )
+
+        if session.memory is not None:
+          for notice in has_more_notices + tool_guidance:
+            await session.memory.add(notice, MemoryRole.SYSTEM)
+
+        # --- Loop detection --------------------------------------------
+        should_terminate = await self._detect_and_break_loops(
+          session, response.tool_calls, tool_results
+        )
+        if should_terminate:
+          session.status = SessionStatus.FAILED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          return RunResult(
+            success=False,
+            session=session,
+            error=f"Agent loop detected: tool '{session._tool_call_history[-1][0] if hasattr(session, '_tool_call_history') else 'unknown'}' was called repeatedly without meaningful progress.",
+            error_type="loop_detected",
+          )
 
         # Checkpoint after each turn
         await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -315,7 +365,13 @@ class ReActAgent:
           if prompt:
             messages.append(LLMMessage(role=LLMMessageRole.USER, content=prompt))
 
-        tools = [t.to_json_schema() for t in session.agent.tools] if session.agent.tools else None
+        # Filter out temporarily blocked tools (loop detection escalation)
+        blocked = getattr(session, "_blocked_tools", set())
+        available_tools = [
+          t for t in session.agent.tools
+          if t.name not in blocked
+        ] if session.agent.tools else []
+        tools = [t.to_json_schema() for t in available_tools] if available_tools else None
 
         # --- Streaming LLM call --------------------------------------
         accumulated_content = ""
@@ -436,17 +492,19 @@ class ReActAgent:
         for item in tool_results:
           if isinstance(item, Exception):
             tc_id = "unknown"
+            tc_name = ""
             obs_text = f"Error: {type(item).__name__}: {item}"
           else:
             tc, tr = item
             tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+            tc_name = tc.get("function", {}).get("name", "")
             obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
 
             yield StreamEvent(
               type="tool_call_result",
               data={
                 "tool_call_id": tc_id,
-                "name": tc.get("function", {}).get("name", ""),
+                "name": tc_name,
                 "result_preview": str(tr)[:500],
                 "is_error": isinstance(tr, Exception),
               },
@@ -457,7 +515,49 @@ class ReActAgent:
               obs_text,
               MemoryRole.TOOL,
               tool_call_id=tc_id,
+              tool_name=tc_name,
             )
+
+        # Inject ToolResponse metadata SYSTEM messages *after* all TOOL
+        # entries so that ASSISTANT+tool_calls stay contiguous with their
+        # corresponding TOOL responses.
+        if session.memory is not None:
+          stream_guidance: list[str] = []
+          stream_notices: list[str] = []
+          for item in tool_results:
+            if isinstance(item, Exception):
+              continue
+            tc, tr = item
+            if isinstance(tr, dict):
+              suggested = tr.get("suggested_next_step")
+              if suggested:
+                stream_guidance.append(f"[Tool guidance] {suggested}")
+              if tr.get("has_more") is False:
+                func_name = tc.get("function", {}).get("name", "the tool")
+                stream_notices.append(
+                  f"[System notice] {func_name} returned 'has_more': false — "
+                  "there is no additional data available."
+                )
+          for notice in stream_notices + stream_guidance:
+            await session.memory.add(notice, MemoryRole.SYSTEM)
+
+        # --- Loop detection (streaming) --------------------------------
+        should_terminate = await self._detect_and_break_loops(
+          session, response.tool_calls, tool_results
+        )
+        if should_terminate:
+          session.status = SessionStatus.FAILED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          yield StreamEvent(
+            type="error",
+            data={
+              "success": False,
+              "error": f"Agent loop detected: tool was called repeatedly without meaningful progress.",
+              "error_type": "loop_detected",
+            },
+          )
+          return
 
         await runner.checkpoint_store.save_session(session.session_id, session.to_state())
 
@@ -732,6 +832,196 @@ class ReActAgent:
 
     # Default: "content" — return the parsed LLM text reply
     return parsed_content
+
+  # ------------------------------------------------------------------ #
+  # Loop detection
+  # ------------------------------------------------------------------ #
+
+  async def _detect_and_break_loops(
+    self,
+    session: Session,
+    tool_calls: list[dict[str, Any]],
+    tool_results: list[Any],
+  ) -> bool:
+    """Detect repetitive tool-call patterns and take graded action.
+
+    Returns ``True`` when a terminal loop has been detected and the caller
+    should abort the turn (after saving checkpoint).
+
+    Detection layers (in order):
+    1. **has_more exemption** – calls that legitimately paginate are not
+       counted toward loop thresholds.
+    2. **Consecutive tool** – same tool called repeatedly (even with
+       different arguments).
+    3. **Identical arguments** – same (tool_name, arguments) pair appears
+       multiple times in the recent window.
+    4. **Short-cycle** – A→B→A→B or A→B→C→A→B→C patterns.
+    5. **Result similarity** – same tool produces substantively identical
+       output across consecutive calls (catches ``grep(\"foo\")`` →
+       ``grep(\"Foo\")`` where results are the same).
+
+    Response escalation:
+    | trigger count | action |
+    |---------------|--------|
+    | 1st           | inject warning into memory |
+    | 2nd           | stronger warning + temporarily block the tool(s) |
+    | 3rd+          | force termination (return ``True``) |
+    """
+    if session.memory is None:
+      return False
+
+    # Build a signature for each tool call in this turn
+    current_sigs: list[tuple[str, str]] = []
+    for tc in tool_calls:
+      func = tc.get("function", {})
+      name = func.get("name", "")
+      args = func.get("arguments", "")
+      args_norm = re.sub(r"\s+", "", str(args))
+      current_sigs.append((name, args_norm))
+
+    # -- History tracking -------------------------------------------------
+    if not hasattr(session, "_tool_call_history"):
+      session._tool_call_history = []  # type: ignore[attr-defined]
+      session._tool_result_history = []  # type: ignore[attr-defined]
+      session._loop_trigger_count = 0  # type: ignore[attr-defined]
+      session._blocked_tools = set()  # type: ignore[attr-defined]
+
+    session._tool_call_history.extend(current_sigs)  # type: ignore[attr-defined]
+    session._tool_result_history.extend(tool_results)  # type: ignore[attr-defined]
+    history: list[tuple[str, str]] = session._tool_call_history  # type: ignore[attr-defined]
+    result_history: list[Any] = session._tool_result_history  # type: ignore[attr-defined]
+
+    # -- Heuristic helpers ------------------------------------------------
+    def _has_more_true(idx: int) -> bool:
+      """Check whether the result at *idx* indicates more data is available."""
+      if idx < 0 or idx >= len(result_history):
+        return False
+      res = result_history[idx]
+      return isinstance(res, dict) and res.get("has_more") is True
+
+    def _has_more_false(idx: int) -> bool:
+      res = result_history[idx] if 0 <= idx < len(result_history) else None
+      return isinstance(res, dict) and res.get("has_more") is False
+
+    def _results_similar(a: Any, b: Any, threshold: float = 0.9) -> bool:
+      """Compare two tool results for substantive equality."""
+      text_a = json.dumps(a, sort_keys=True, ensure_ascii=False, default=str)
+      text_b = json.dumps(b, sort_keys=True, ensure_ascii=False, default=str)
+      if len(text_a) < 100 and len(text_b) < 100:
+        return text_a == text_b
+      import difflib
+      return difflib.SequenceMatcher(None, text_a, text_b).ratio() > threshold
+
+    # -- Heuristic 1: consecutive same tool (with has_more awareness) -----
+    consecutive_count = 1
+    for i in range(len(history) - 2, -1, -1):
+      if history[i][0] == history[-1][0]:
+        # If the *previous* call's result said has_more=True, this call is
+        # likely a legitimate pagination request — count it at half weight.
+        prev_idx = len(result_history) - (len(history) - i)
+        if _has_more_true(prev_idx):
+          consecutive_count += 0.5
+        else:
+          consecutive_count += 1
+      else:
+        break
+
+    # Accelerate detection when has_more=false but tool is still called
+    h1_threshold = self.max_repeated_tool_calls
+    if history and _has_more_false(len(result_history) - 1):
+      h1_threshold = max(2, h1_threshold - 1)
+
+    h1_triggered = consecutive_count >= h1_threshold
+
+    # -- Heuristic 2: repeated (name, args) pair --------------------------
+    recent = history[-10:]
+    repeat_counts: dict[tuple[str, str], int] = {}
+    for sig in recent:
+      repeat_counts[sig] = repeat_counts.get(sig, 0) + 1
+    max_repeat = max(repeat_counts.values()) if repeat_counts else 0
+    h2_triggered = max_repeat >= self.loop_similarity_threshold
+
+    # -- Heuristic 3: short-cycle detection (A→B→A→B, A→B→C→A→B→C) -----
+    h3_triggered = False
+    if len(history) >= 4:
+      names = [s[0] for s in history[-4:]]
+      if names[0] == names[2] and names[1] == names[3] and names[0] != names[1]:
+        h3_triggered = True
+    if len(history) >= 6 and not h3_triggered:
+      names = [s[0] for s in history[-6:]]
+      if names[:3] == names[3:]:
+        h3_triggered = True
+
+    # -- Heuristic 4: result similarity -----------------------------------
+    h4_triggered = False
+    if len(result_history) >= 3 and len(history) >= 3:
+      # Compare last 3 results of the same tool
+      last_tool = history[-1][0]
+      same_tool_results = [
+        result_history[i]
+        for i in range(len(history))
+        if history[i][0] == last_tool
+      ][-3:]
+      if len(same_tool_results) == 3:
+        if (
+          _results_similar(same_tool_results[0], same_tool_results[1])
+          and _results_similar(same_tool_results[1], same_tool_results[2])
+        ):
+          h4_triggered = True
+
+    loop_detected = h1_triggered or h2_triggered or h3_triggered or h4_triggered
+
+    if not loop_detected:
+      return False
+
+    # -- Escalation -------------------------------------------------------
+    session._loop_trigger_count += 1  # type: ignore[attr-defined]
+    trigger_count: int = session._loop_trigger_count  # type: ignore[attr-defined]
+
+    tool_name = history[-1][0] if history else "unknown"
+    _logger.warning(
+      "react.loop_detected",
+      session_id=session.session_id,
+      trigger_count=trigger_count,
+      h1=h1_triggered,
+      h2=h2_triggered,
+      h3=h3_triggered,
+      h4=h4_triggered,
+      tool=tool_name,
+    )
+
+    if trigger_count == 1:
+      warning = (
+        f"[System notice] The tool '{tool_name}' has been called repeatedly "
+        "with similar arguments or patterns. Please STOP calling this tool "
+        "and proceed based on the information you already have."
+      )
+      await session.memory.add(warning, MemoryRole.SYSTEM)
+      return False
+
+    if trigger_count == 2:
+      warning = (
+        f"[System notice] Loop confirmed — '{tool_name}' is still being called "
+        "repeatedly. This tool is now TEMPORARILY DISABLED. You must use "
+        "other tools or provide a final answer."
+      )
+      await session.memory.add(warning, MemoryRole.SYSTEM)
+      # Block the tool(s) involved in the loop
+      for sig in recent:
+        if repeat_counts.get(sig, 0) >= 2:
+          session._blocked_tools.add(sig[0])  # type: ignore[attr-defined]
+      if tool_name not in session._blocked_tools:  # type: ignore[attr-defined]
+        session._blocked_tools.add(tool_name)  # type: ignore[attr-defined]
+      return False
+
+    # trigger_count >= 3 — force termination
+    warning = (
+      f"[System notice] Agent loop detected after multiple warnings. "
+      f"Tool '{tool_name}' was called repeatedly without meaningful progress. "
+      "Terminating execution."
+    )
+    await session.memory.add(warning, MemoryRole.SYSTEM)
+    return True
 
 
 # --------------------------------------------------------------------------- #
@@ -1211,11 +1501,16 @@ class ToolEvaluator:
         feedback=f"Evaluation tool failed: {type(exc).__name__}: {exc}",
       )
 
-    if isinstance(raw, dict):
-      passed = raw.get("passed", False)
-      feedback = raw.get("feedback", "")
-      score = raw.get("score")
+    # Unwrap normalised tool-response wrapper if present
+    eval_dict = raw
+    if isinstance(raw, dict) and "result" in raw and "has_more" in raw:
+      eval_dict = raw.get("result", raw)
+
+    if isinstance(eval_dict, dict):
+      passed = eval_dict.get("passed", False)
+      feedback = eval_dict.get("feedback", "")
+      score = eval_dict.get("score")
       return EvaluationResult(passed=passed, feedback=feedback, score=score)
 
     # Treat truthy return as passed
-    return EvaluationResult(passed=bool(raw), feedback=str(raw))
+    return EvaluationResult(passed=bool(eval_dict), feedback=str(eval_dict))

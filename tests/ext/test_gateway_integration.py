@@ -231,8 +231,8 @@ async def test_gateway_session_persistence(real_llm_runner):
   await adapter.inject(msg2)
   print(f"\n[Session persistence - msg2 response]: {adapter.sent[-1][1]}")
 
-  # Verify session was persisted
-  session_key = "telegram:charlie"
+  # Verify session was persisted (default key strategy is platform:chat_id:sender)
+  session_key = "telegram:chat-789:charlie"
   session_id = gateway._session_map.get(session_key)
   assert session_id is not None
   print(f"\n[Session persisted]: {session_key} -> {session_id}")

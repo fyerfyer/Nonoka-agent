@@ -49,7 +49,7 @@ def test_resolve_refs_basic():
     "s2": StepResult(data="hello"),
   }
   # source.data is {"value": 42}, so path "value" resolves to 42
-  args = {"a": Ref("s1", "value"), "b": 10}
+  args = {"a": ref("s1", "value"), "b": 10}
   resolved = _resolve_refs(args, completed)
   assert resolved["a"] == 42
   assert resolved["b"] == 10
@@ -57,7 +57,7 @@ def test_resolve_refs_basic():
 
 def test_resolve_refs_missing_step():
   with pytest.raises(ValueError, match="not found"):
-    _resolve_refs({"x": Ref("missing", "data")}, {})
+    _resolve_refs({"x": ref("missing", "data")}, {})
 
 
 # --------------------------------------------------------------------------- #
@@ -152,8 +152,9 @@ async def test_plan_executor_executes_plan():
   assert session.status == SessionStatus.COMPLETED
   assert "s1" in session.completed_steps
   assert "s2" in session.completed_steps
-  assert session.completed_steps["s1"].data == 3
-  assert session.completed_steps["s2"].data == 12
+  # Tool results are normalised to {"result": value, "has_more": False}
+  assert session.completed_steps["s1"].data == {"result": 3, "has_more": False}
+  assert session.completed_steps["s2"].data == {"result": 12, "has_more": False}
 
 
 @pytest.mark.asyncio
@@ -187,7 +188,7 @@ async def test_plan_executor_ref_resolution():
   result = await executor.execute(plan, session, runner)
 
   assert result.success is True
-  assert session.completed_steps["s2"].data == "Hello, world!"
+  assert session.completed_steps["s2"].data == {"result": "Hello, world!", "has_more": False}
 
 
 @pytest.mark.asyncio
@@ -228,7 +229,7 @@ async def test_plan_executor_step_retry_and_failure():
 
   assert result.success is True
   assert call_count == 3
-  assert session.completed_steps["s1"].data == "ok"
+  assert session.completed_steps["s1"].data == {"result": "ok", "has_more": False}
 
 
 @pytest.mark.asyncio
@@ -302,7 +303,7 @@ async def test_plan_executor_skips_completed_on_resume():
   assert result.success is True
   # s1 should keep its checkpointed result, s2 should execute
   assert session.completed_steps["s1"].data == 100
-  assert session.completed_steps["s2"].data == 2
+  assert session.completed_steps["s2"].data == {"result": 2, "has_more": False}
 
 
 # --------------------------------------------------------------------------- #
@@ -741,7 +742,7 @@ def test_resolve_refs_with_list_index():
   completed = {
     "fetch": StepResult(data={"users": [{"id": 1, "name": "Alice"}, {"id": 2, "name": "Bob"}]}),
   }
-  args = {"user": Ref("fetch", "users.0")}
+  args = {"user": ref("fetch", "users.0")}
   resolved = _resolve_refs(args, completed)
   assert resolved["user"] == {"id": 1, "name": "Alice"}
 
@@ -751,7 +752,7 @@ def test_resolve_refs_with_list_index_nested():
   completed = {
     "fetch": StepResult(data={"users": [{"id": 1, "name": "Alice"}]}),
   }
-  args = {"name": Ref("fetch", "users.0.name")}
+  args = {"name": ref("fetch", "users.0.name")}
   resolved = _resolve_refs(args, completed)
   assert resolved["name"] == "Alice"
 
@@ -792,7 +793,7 @@ async def test_plan_executor_ref_list_index():
   result = await executor.execute(plan, session, runner)
 
   assert result.success is True
-  assert session.completed_steps["greet"].data == "Hello, Alice!"
+  assert session.completed_steps["greet"].data == {"result": "Hello, Alice!", "has_more": False}
 
 
 @pytest.mark.asyncio
@@ -831,4 +832,4 @@ async def test_plan_executor_ref_list_index_second_element():
   result = await executor.execute(plan, session, runner)
 
   assert result.success is True
-  assert session.completed_steps["proc"].data == "processed:second"
+  assert session.completed_steps["proc"].data == {"result": "processed:second", "has_more": False}

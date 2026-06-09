@@ -94,11 +94,32 @@ class SQLiteCheckpointStore(CheckpointStore):
 
   @staticmethod
   def _state_to_json(state: SessionState) -> str:
-    return state.model_dump_json()
+    def _fallback(obj: Any) -> Any:
+      from nonoka.core.plan import Ref
+      if isinstance(obj, Ref):
+        return {"__type__": "ref", "step_id": obj.step_id, "path": obj.path}
+      raise TypeError(f"Cannot serialize {type(obj).__name__}")
+
+    return state.model_dump_json(fallback=_fallback)
 
   @staticmethod
   def _state_from_json(data: str) -> SessionState:
-    return SessionState.model_validate_json(data)
+    import json
+    from nonoka.core.plan import Ref
+
+    raw = json.loads(data)
+
+    def _restore_refs(obj: Any) -> Any:
+      if isinstance(obj, dict) and obj.get("__type__") == "ref":
+        return Ref(step_id=obj["step_id"], path=obj.get("path", ""))
+      if isinstance(obj, dict):
+        return {k: _restore_refs(v) for k, v in obj.items()}
+      if isinstance(obj, list):
+        return [_restore_refs(item) for item in obj]
+      return obj
+
+    restored = _restore_refs(raw)
+    return SessionState.model_validate(restored)
 
   # ------------------------------------------------------------------ #
   # Protocol implementation

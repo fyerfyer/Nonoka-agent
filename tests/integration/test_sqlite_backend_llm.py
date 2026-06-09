@@ -156,6 +156,7 @@ async def test_plan_execution_with_sqlite_checkpoint(deepseek_model):
   saved_state = await checkpoint_store.load_session(result.session.session_id)
   assert saved_state is not None
   assert "step-1" in saved_state.completed_steps
-  assert saved_state.completed_steps["step-1"].data == 3
+  # Tool results are now normalised to standard shape
+  assert saved_state.completed_steps["step-1"].data == {"result": 3, "has_more": False}
 
   await checkpoint_store.close()

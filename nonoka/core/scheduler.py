@@ -60,6 +60,12 @@ def _resolve_refs(data: Any, completed_steps: dict[str, Any]) -> Any:
 
   Recursively walks dicts and lists so refs nested at any depth are
   resolved (e.g. ``{"data": {"sum": ref("calc", "result")}}``).
+
+  When a ref points to a step result that was normalised by
+  ``unwrap_tool_response``, the wrapper dict
+  ``{"result": X, "has_more": ...}`` is automatically unwrapped so the
+  caller receives the raw *X* (only when *path* is empty – explicit paths
+  such as ``ref("calc", "result")`` skip unwrapping).
   """
   if isinstance(data, Ref):
     source = completed_steps.get(data.step_id)
@@ -70,7 +76,22 @@ def _resolve_refs(data: Any, completed_steps: dict[str, Any]) -> Any:
       )
     # source may be a StepResult (has .data) or raw dict
     source_data = source.data if hasattr(source, "data") else source
-    return _resolve_path(source_data, data.path)
+    resolved = _resolve_path(source_data, data.path)
+
+    # If resolution failed and the step data is a normalised tool-response
+    # wrapper, try resolving the path inside the wrapped original result.
+    # This lets ``ref("step", "users.0.name")`` work when the tool returned
+    # a dict like ``{"users": [...]}`` that was wrapped as
+    # ``{"result": {"users": [...]}, "has_more": False}``.
+    if resolved is None and isinstance(source_data, dict) and "result" in source_data and "has_more" in source_data:
+      resolved = _resolve_path(source_data.get("result"), data.path)
+
+    # Auto-unwrap normalised tool-response wrapper when no explicit path
+    # was given.  This ensures that ``ref("calc")`` yields the original
+    # tool return value (e.g. 56.0) rather than {"result": 56.0, ...}.
+    if data.path == "" and isinstance(resolved, dict) and "result" in resolved and "has_more" in resolved:
+      return resolved["result"]
+    return resolved
 
   if isinstance(data, dict):
     return {k: _resolve_refs(v, completed_steps) for k, v in data.items()}

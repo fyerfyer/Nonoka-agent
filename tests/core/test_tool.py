@@ -35,9 +35,9 @@ async def test_tool_invoke_validation():
   session = Session(session_id="test", agent=agent, deps=None)
   ctx = RunContext(session)
 
-  # Normal invocation
+  # Normal invocation — returns are now normalised to standard shape
   result = await add.invoke(ctx, {"a": 1, "b": 2})
-  assert result == 3
+  assert result == {"result": 3, "has_more": False}
 
   # Validation interception:
   # When LLM hallucinates and passes an uncastable parameter,

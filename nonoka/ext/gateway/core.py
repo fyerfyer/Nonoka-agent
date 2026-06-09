@@ -59,17 +59,69 @@ ResultT = TypeVar("ResultT")
 # GatewayMessage — platform-agnostic standard message format
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Message type enum
+# --------------------------------------------------------------------------- #
+
+class MessageType(str):
+  """Standard message types supported by Gateway."""
+  TEXT = "text"
+  IMAGE = "image"
+  VOICE = "voice"
+  FILE = "file"
+  RICH_TEXT = "rich_text"
+  SYSTEM = "system"
+
+
 @dataclass
 class GatewayMessage:
-  """Platform-agnostic standard message format."""
+  """Platform-agnostic standard message format.
+
+  Supports both plain text and rich media messages.
+  For non-text messages, *content* may be a caption/description,
+  and *media* carries the actual media payload.
+  """
 
   message_id: str
   sender: str          # Unique user identifier
   platform: str        # "telegram" | "qq" | "discord" | ...
   chat_id: str         # Group / channel / DM identifier
   content: str
+  message_type: str = MessageType.TEXT
   reply_to: str | None = None  # ID of the message being replied to
+  media: dict | None = None    # Media payload for image/voice/file: {"url": ..., "mime": ...}
+  mentions: list[str] = field(default_factory=list)  # List of mentioned user IDs
   raw: dict = field(default_factory=dict)  # Original platform payload
+  timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# --------------------------------------------------------------------------- #
+# GatewayEvent — system-level events from the platform
+# --------------------------------------------------------------------------- #
+
+class GatewayEventType(str):
+  """Standard gateway event types."""
+  MEMBER_JOINED = "member_joined"
+  MEMBER_LEFT = "member_left"
+  FRIEND_REQUEST = "friend_request"
+  GROUP_INVITE = "group_invite"
+  MESSAGE_EDITED = "message_edited"
+  MESSAGE_DELETED = "message_deleted"
+
+
+@dataclass
+class GatewayEvent:
+  """System event from a platform adapter.
+
+  Distinct from ``GatewayMessage`` — events are not user messages,
+  but platform signals (member joins, friend requests, etc.).
+  """
+
+  event_type: str
+  platform: str
+  chat_id: str
+  sender: str
+  data: dict = field(default_factory=dict)
   timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -121,6 +173,17 @@ class GatewayAdapter(Protocol):
 # Gateway
 # --------------------------------------------------------------------------- #
 
+# Default session key strategies
+def _default_session_key_strategy(msg: GatewayMessage) -> str:
+  """Private-chat-level isolation: platform + chat + sender."""
+  return f"{msg.platform}:{msg.chat_id}:{msg.sender}"
+
+
+def _group_shared_session_key_strategy(msg: GatewayMessage) -> str:
+  """Group-level shared context: platform + chat only."""
+  return f"{msg.platform}:{msg.chat_id}"
+
+
 class Gateway:
   """Platform access entry point.
 
@@ -144,16 +207,20 @@ class Gateway:
     self,
     runner: Runner,
     limiter: "Limiter | None" = None,
+    session_key_strategy: Callable[[GatewayMessage], str] | None = None,
   ):
     self.runner = runner
     self.adapters: dict[str, GatewayAdapter] = {}
     self._limiter = limiter
 
+    # Session key strategy — configurable for different isolation levels
+    self._session_key_strategy = session_key_strategy or _default_session_key_strategy
+
     # Ensure the runner knows about this gateway so sessions are bound
     # correctly and tools can access ctx.gateway via RunContext.
     runner.gateway = self
 
-    # Cross-platform session mapping: (platform, sender) -> session_id
+    # Cross-platform session mapping: key -> session_id
     from nonoka.ext.gateway.session_map import SessionMap
     self._session_map = SessionMap()
 
@@ -231,14 +298,13 @@ class Gateway:
     agent: Agent,
   ) -> None:
     """Execute *agent* for *msg* and push the response back."""
-    session_key = f"{msg.platform}:{msg.sender}"
+    session_key = self._session_key_strategy(msg)
     session_id = self._session_map.get(session_key)
 
     adapter = self.adapters.get(msg.platform)
     if adapter is None:
       return
 
-    # Inject gateway into the session so tools can access it via RunContext
     deps = msg  # GatewayMessage is the deps object
 
     if getattr(agent, "supports_streaming", False):
