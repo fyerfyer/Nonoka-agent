@@ -111,13 +111,12 @@ class TestPromptDecorator:
 
     assert greet.__doc__ == "A greeting prompt"
 
-  @pytest.mark.asyncio
-  async def test_prompt_call(self):
+  def test_prompt_call(self):
     @prompt
     def simple(name: str) -> str:
       return f"Hello {name}"
 
-    result = await simple("test")
+    result = simple("test")
     assert result == "Hello test"
 
   def test_async_prompt_cannot_render_sync(self):

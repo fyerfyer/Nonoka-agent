@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, TypeVar
 
 from nonoka.core.types import Capability, RetryPolicy
+from nonoka.core.runner import _Unset, _UNSET
 
 
 DepsT = TypeVar("DepsT")
@@ -196,19 +197,19 @@ class RunnerBuilder:
   """
 
   def __init__(self):
-    self._checkpoint: str | None = "memory"
-    self._memory: str | None = None
+    self._checkpoint: str | None | _Unset = _UNSET
+    self._memory: str | None | _Unset = _UNSET
     self._circuit_breaker: Any | None = None
     self._hooks: Any | None = None
     self._gateway: Any | None = None
 
   def checkpoint(self, value: str | None) -> RunnerBuilder:
-    """Set checkpoint backend (``memory``, ``redis``, or custom)."""
+    """Set checkpoint backend (``memory``, ``disabled``, or custom)."""
     self._checkpoint = value
     return self
 
   def memory(self, value: str | None) -> RunnerBuilder:
-    """Set memory backend (``in_memory``, ``mem0``, or custom)."""
+    """Set memory backend (``in_memory``, ``disabled``, or custom)."""
     self._memory = value
     return self
 
@@ -232,9 +233,9 @@ class RunnerBuilder:
     from nonoka.core.runner import Runner
 
     kwargs: dict[str, Any] = {}
-    if self._checkpoint is not None:
+    if not isinstance(self._checkpoint, _Unset):
       kwargs["checkpoint"] = self._checkpoint
-    if self._memory is not None:
+    if not isinstance(self._memory, _Unset):
       kwargs["memory"] = self._memory
     if self._circuit_breaker is not None:
       kwargs["circuit_breaker"] = self._circuit_breaker

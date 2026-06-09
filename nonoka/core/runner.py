@@ -20,6 +20,13 @@ DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
 
 
+class _Unset:
+  """Sentinel to distinguish "user passed None" from "user passed nothing"."""
+
+
+_UNSET = _Unset()
+
+
 class Runner:
   """Stateless execution coordinator.
 
@@ -43,12 +50,9 @@ class Runner:
     runner = Runner()
     result = await runner.run_react(agent, "Hello", deps=None)
 
-  Production usage::
+  Memory-only (testing)::
 
-    runner = Runner(
-      checkpoint="redis",
-      memory="in_memory",
-    )
+    runner = Runner(checkpoint="memory")
 
   Streaming usage (CLI)::
 
@@ -72,8 +76,8 @@ class Runner:
 
   def __init__(
     self,
-    checkpoint: str | CheckpointStore | None = "memory",
-    memory: str | MemoryBackend | None = None,
+    checkpoint: str | CheckpointStore | None = None,
+    memory: str | MemoryBackend | None | _Unset = _UNSET,
     circuit_breaker: CircuitBreaker | None = None,
     hooks: Hooks | None = None,
     gateway: Any | None = None,
@@ -84,10 +88,10 @@ class Runner:
     # Optional circuit breaker shared across all providers created by this runner.
     self._circuit_breaker = circuit_breaker
 
-    # 2. Checkpoint store
+    # 2. Checkpoint store (default: SQLite persistent)
     self.checkpoint_store = self._resolve_checkpoint(checkpoint)
 
-    # 3. Memory backend
+    # 3. Memory backend (default: SQLite persistent, None = disabled)
     self.memory_backend = self._resolve_memory(memory)
 
     # 4. Hooks / middleware
@@ -160,12 +164,16 @@ class Runner:
       )
 
   def _resolve_checkpoint(self, checkpoint: str | CheckpointStore | None) -> CheckpointStore:
-    if checkpoint is None or checkpoint == "memory":
+    if checkpoint is None:
+      # Default: SQLite persistent store
+      from nonoka.backends.checkpoint.sqlite import SQLiteCheckpointStore
+      return SQLiteCheckpointStore()
+    if checkpoint == "memory":
       from nonoka.backends.checkpoint.memory import MemoryCheckpointStore
       return MemoryCheckpointStore()
-    if checkpoint == "redis":
-      from nonoka.backends.checkpoint.redis import RedisCheckpointStore
-      return RedisCheckpointStore()
+    if checkpoint == "disabled":
+      from nonoka.backends.checkpoint.noop import NoOpCheckpointStore
+      return NoOpCheckpointStore()
     # Duck-typing: accept any object that quacks like a CheckpointStore
     self._validate_callable(
       checkpoint, "CheckpointStore",
@@ -173,12 +181,17 @@ class Runner:
     )
     return checkpoint  # type: ignore[return-value]
 
-  def _resolve_memory(self, memory: str | MemoryBackend | None) -> MemoryBackend | None:
-    if memory is None:
+  def _resolve_memory(self, memory: str | MemoryBackend | None | _Unset) -> MemoryBackend | None:
+    if isinstance(memory, _Unset):
+      # Default: SQLite persistent backend
+      from nonoka.backends.memory.sqlite import SQLiteMemoryBackend
+      return SQLiteMemoryBackend()
+    if memory is None or memory == "disabled":
       return None
     if memory == "in_memory":
       from nonoka.backends.memory.in_memory import InMemoryBackend
       return InMemoryBackend()
+    # Duck-typing: accept any object that quacks like a MemoryBackend
     self._validate_callable(
       memory, "MemoryBackend",
       ["add", "search", "get_history", "get_user_memory"]

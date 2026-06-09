@@ -100,7 +100,7 @@ class AgentConfig:
 @dataclass
 class RunnerConfig:
   """Resolved Runner configuration — ready to build."""
-  checkpoint: str | None = "memory"
+  checkpoint: str | None = None
   memory: str | None = None
 
   def build(self) -> Any:

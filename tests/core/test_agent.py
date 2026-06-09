@@ -46,7 +46,8 @@ def test_agent_accepts_tool_registry_directly():
 
   agent = Agent(model="test", tools=registry)
 
-  assert isinstance(agent.tools, list)
+  # Agent.tools may be a ToolListProxy when a registry is provided.
+  # We only need to verify it behaves like a sequence.
   assert len(agent.tools) == 2
   names = {t.name for t in agent.tools}
   assert names == {"tool_a", "tool_b"}

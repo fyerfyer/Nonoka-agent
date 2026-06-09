@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 from .in_memory import InMemoryBackend
+from .sqlite import SQLiteMemoryBackend
 
-try:
-  from .mem0_ext import Mem0Backend
-except ImportError:
-  Mem0Backend = None
-
-__all__ = ["InMemoryBackend", "Mem0Backend"]
+__all__ = ["InMemoryBackend", "SQLiteMemoryBackend"]

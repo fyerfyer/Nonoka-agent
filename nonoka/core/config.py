@@ -22,11 +22,10 @@ class NonokaSettings(BaseSettings):
   max_concurrency: int = 10
 
   # Memory backend configuration
-  memory_backend: str = "in_memory"     # Optional: in_memory, redis, langmem, etc.
-  redis_url: str | None = None
+  memory_backend: str = "sqlite"        # Optional: sqlite, in_memory
 
   # Checkpoint backend configuration
-  checkpoint_backend: str = "memory"    # Optional: memory, redis, postgres
+  checkpoint_backend: str = "sqlite"    # Optional: sqlite, memory
   checkpoint_interval: str = "per_step" # Optional: per_step, per_layer
 
   # Observability

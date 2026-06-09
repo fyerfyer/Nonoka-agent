@@ -65,7 +65,7 @@ class AgentConfigModel(BaseModel):
 
 class RunnerConfigModel(BaseModel):
   """Pydantic model for validating Runner configuration."""
-  checkpoint: str | None = "memory"
+  checkpoint: str | None = None
   memory: str | None = None
 
 
