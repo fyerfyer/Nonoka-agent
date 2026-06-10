@@ -303,3 +303,59 @@ async def test_load_session_without_step_updates(memory_store):
   loaded = await memory_store.load_session("sess-plain")
   assert loaded is not None
   assert loaded.step_statuses["step-1"] == StepStatus.PENDING
+
+
+# --------------------------------------------------------------------------- #
+# Step status recovery ordering (Bug fix: P1.2)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_load_session_step_status_not_overwritten_by_old_status(memory_store):
+  """When a step completes, load_session should return COMPLETED even if
+  an older 'status' row (e.g. RUNNING from step start) exists in step_updates.
+
+  This verifies that step_updates are applied in chronological order so
+  later updates (result / error) overwrite earlier ones (status)."""
+  state = _make_state(
+    session_id="sess-order",
+    step_statuses={},
+    completed_steps={},
+  )
+  await memory_store.save_session("sess-order", state)
+
+  # Simulate step execution lifecycle:
+  # 1. Step starts → save_step_status(RUNNING)
+  await memory_store.save_step_status("sess-order", "step-1", StepStatus.RUNNING)
+  # 2. Step completes → save_step_result(COMPLETED)
+  await memory_store.save_step_result("sess-order", "step-1", result={"ok": True})
+
+  loaded = await memory_store.load_session("sess-order")
+  assert loaded is not None
+  assert loaded.step_statuses["step-1"] == StepStatus.COMPLETED
+  assert loaded.completed_steps["step-1"].data == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_load_session_step_result_overrides_failed_status(memory_store):
+  """A step that was previously marked FAILED should be updated to COMPLETED
+  when a new result is saved (e.g. on retry-success)."""
+  state = _make_state(
+    session_id="sess-retry",
+    step_statuses={},
+    completed_steps={},
+  )
+  await memory_store.save_session("sess-retry", state)
+
+  # 1. Step fails
+  try:
+    raise RuntimeError("boom")
+  except RuntimeError as exc:
+    await memory_store.save_step_error("sess-retry", "step-1", error=exc)
+  # 2. Retry succeeds
+  await memory_store.save_step_result("sess-retry", "step-1", result="fixed")
+
+  loaded = await memory_store.load_session("sess-retry")
+  assert loaded is not None
+  assert loaded.step_statuses["step-1"] == StepStatus.COMPLETED
+  assert loaded.completed_steps["step-1"].data == "fixed"
+  assert "step-1" not in loaded.failed_steps

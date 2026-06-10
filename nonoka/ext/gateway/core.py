@@ -218,7 +218,8 @@ class Gateway:
 
     # Ensure the runner knows about this gateway so sessions are bound
     # correctly and tools can access ctx.gateway via RunContext.
-    runner.gateway = self
+    # Use add_gateway() to avoid overwriting any existing gateway bindings.
+    runner.add_gateway(self)
 
     # Cross-platform session mapping: key -> session_id
     from nonoka.ext.gateway.session_map import SessionMap

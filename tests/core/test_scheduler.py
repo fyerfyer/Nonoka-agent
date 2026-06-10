@@ -13,7 +13,7 @@ from nonoka.core.scheduler import (
   _resolve_path,
 )
 from nonoka.core.paradigm import ReActAgent, PlanExecutor, ToolEvaluator, EvaluationResult
-from nonoka.core.errors import ErrorPolicy, TransientError, LogicError, CancelledError
+from nonoka.core.errors import ErrorPolicy, TransientError, LogicError, CancelledError, ToolFatalError, SafetyError, ToolErrorActionType
 from nonoka.core.types import RunResult
 from nonoka.backends.checkpoint.memory import MemoryCheckpointStore
 
@@ -833,3 +833,177 @@ async def test_plan_executor_ref_list_index_second_element():
 
   assert result.success is True
   assert session.completed_steps["proc"].data == {"result": "processed:second", "has_more": False}
+
+
+# --------------------------------------------------------------------------- #
+# ErrorPolicy FAIL / HALT semantics (Bug fix: P1.1)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_react_agent_fail_policy_terminates_execution():
+  """When ErrorPolicy returns FAIL, the run should terminate immediately
+  instead of feeding the error back to the LLM as an observation."""
+  call_count = 0
+
+  @tool
+  async def always_fail(ctx: RunContext) -> str:
+    nonlocal call_count
+    call_count += 1
+    raise LogicError("I always fail")
+
+  agent = Agent(model="test", tools=[always_fail], max_turns=5)
+  session = Session(session_id="test", agent=agent, deps=None)
+  store = MemoryCheckpointStore()
+
+  mock_llm = MockLLM([
+    {
+      "content": None,
+      "tool_calls": [
+        {"id": f"tc{i}", "function": {"name": "always_fail", "arguments": "{}"}}
+      ],
+    }
+    for i in range(3)
+  ])
+
+  from nonoka.core.hooks import Hooks
+  class MockRunner:
+    def __init__(self):
+      self.checkpoint_store = store
+      self.llm = mock_llm
+      self.hooks = Hooks()
+
+  runner = MockRunner()
+  # Default ErrorPolicy routes LogicError -> REPORT, so force FAIL
+  policy = ErrorPolicy()
+  original_on_error = policy.on_tool_error
+  def forced_fail(error, step_id):
+    from nonoka.core.errors import ToolErrorAction
+    return ToolErrorAction.fail()
+  policy.on_tool_error = forced_fail
+
+  paradigm = ReActAgent(error_policy=policy)
+  result = await paradigm.run(session, runner, prompt="Test")
+
+  assert result.success is False
+  assert result.error_type == "tool_error"
+  assert call_count == 1, "FAIL should terminate after first failure, not retry or continue"
+  assert session.status == SessionStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_react_agent_halt_policy_terminates_execution():
+  """When ErrorPolicy returns HALT, the run should terminate immediately."""
+  @tool
+  async def dangerous(ctx: RunContext) -> str:
+    raise SafetyError("Unsafe operation")
+
+  agent = Agent(model="test", tools=[dangerous], max_turns=5)
+  session = Session(session_id="test", agent=agent, deps=None)
+  store = MemoryCheckpointStore()
+
+  mock_llm = MockLLM([
+    {
+      "content": None,
+      "tool_calls": [
+        {"id": "tc1", "function": {"name": "dangerous", "arguments": "{}"}}
+      ],
+    }
+  ])
+
+  from nonoka.core.hooks import Hooks
+  class MockRunner:
+    def __init__(self):
+      self.checkpoint_store = store
+      self.llm = mock_llm
+      self.hooks = Hooks()
+
+  runner = MockRunner()
+  paradigm = ReActAgent()
+  result = await paradigm.run(session, runner, prompt="Test")
+
+  assert result.success is False
+  assert result.error_type == "halted"
+  assert session.status == SessionStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_react_agent_report_policy_continues_execution():
+  """When ErrorPolicy returns REPORT, the error should be fed back to LLM
+  so it can self-correct — execution should NOT terminate."""
+  call_count = 0
+
+  @tool
+  async def flaky(ctx: RunContext) -> str:
+    nonlocal call_count
+    call_count += 1
+    if call_count == 1:
+      raise LogicError("first attempt fails")
+    return "success"
+
+  agent = Agent(model="test", tools=[flaky], max_turns=5)
+  session = Session(session_id="test", agent=agent, deps=None)
+  store = MemoryCheckpointStore()
+
+  mock_llm = MockLLM([
+    {
+      "content": None,
+      "tool_calls": [
+        {"id": "tc1", "function": {"name": "flaky", "arguments": "{}"}}
+      ],
+    },
+    {
+      "content": None,
+      "tool_calls": [
+        {"id": "tc2", "function": {"name": "flaky", "arguments": "{}"}}
+      ],
+    },
+    {"content": "Done"},
+  ])
+
+  from nonoka.core.hooks import Hooks
+  class MockRunner:
+    def __init__(self):
+      self.checkpoint_store = store
+      self.llm = mock_llm
+      self.hooks = Hooks()
+
+  runner = MockRunner()
+  paradigm = ReActAgent()
+  result = await paradigm.run(session, runner, prompt="Test")
+
+  assert result.success is True
+  assert call_count == 2, "REPORT should allow LLM to retry after seeing the error"
+
+
+@pytest.mark.asyncio
+async def test_react_agent_non_fatal_exception_is_observation():
+  """Generic exceptions (e.g. missing tool) should still be fed to the LLM
+  as observations so it can self-correct, rather than terminating."""
+  agent = Agent(model="test", max_turns=3)
+  session = Session(session_id="test", agent=agent, deps=None)
+  store = MemoryCheckpointStore()
+
+  mock_llm = MockLLM([
+    {
+      "content": None,
+      "tool_calls": [
+        {"id": f"tc{i}", "function": {"name": "missing_tool", "arguments": "{}"}}
+      ],
+    }
+    for i in range(3)
+  ])
+
+  from nonoka.core.hooks import Hooks
+  class MockRunner:
+    def __init__(self):
+      self.checkpoint_store = store
+      self.llm = mock_llm
+      self.hooks = Hooks()
+
+  runner = MockRunner()
+  paradigm = ReActAgent()
+  result = await paradigm.run(session, runner, prompt="Test")
+
+  assert result.success is False
+  assert "Max turns" in result.error
+  assert session.status == SessionStatus.FAILED

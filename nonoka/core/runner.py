@@ -97,8 +97,10 @@ class Runner:
     # 4. Hooks / middleware
     self.hooks = hooks or Hooks()
 
-    # 5. Optional Gateway for reverse-channel (Agent-initiated push)
-    self.gateway = gateway
+    # 5. Optional Gateway(s) for reverse-channel (Agent-initiated push)
+    self._gateways: list[Any] = []
+    if gateway is not None:
+      self._gateways.append(gateway)
 
   # ------------------------------------------------------------------ #
   # LLM provider cache — created on demand per agent.model
@@ -106,6 +108,27 @@ class Runner:
 
   # Current active LLM provider (set by _ensure_llm for backward compatibility)
   llm: LiteLLMProvider | None = None  # type: ignore[misc]
+
+  # ------------------------------------------------------------------ #
+  # Gateway management — supports multiple gateways without overwriting
+  # ------------------------------------------------------------------ #
+
+  @property
+  def gateway(self) -> Any | None:
+    """Return the most recently added Gateway bound to this runner, or None."""
+    return self._gateways[-1] if self._gateways else None
+
+  @gateway.setter
+  def gateway(self, value: Any | None) -> None:
+    """Replace all gateways with a single one (backward-compatible setter)."""
+    self._gateways.clear()
+    if value is not None:
+      self._gateways.append(value)
+
+  def add_gateway(self, gateway: Any) -> None:
+    """Add a Gateway to this runner without overwriting existing ones."""
+    if gateway not in self._gateways:
+      self._gateways.append(gateway)
 
   def _ensure_llm(self, agent: Agent[DepsT, ResultT]) -> LiteLLMProvider:
     """Return a cached LLM provider for *agent.model*, creating one if needed."""
@@ -226,9 +249,10 @@ class Runner:
     session = Session(session_id=sid, agent=agent, deps=deps, memory=memory)
 
     # Bind gateway for reverse-channel push (tools can access ctx.gateway)
-    if self.gateway is not None:
+    if self._gateways:
       import weakref
-      object.__setattr__(session, "_gateway_ref", weakref.ref(self.gateway))
+      # Bind the primary (first) gateway for reverse-channel push
+      object.__setattr__(session, "_gateway_ref", weakref.ref(self._gateways[0]))
 
     # Inherit memory from parent session if requested
     if parent_session_id is not None:

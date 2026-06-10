@@ -45,21 +45,24 @@ def get_time() -> str:
 
 async def main():
     agent = nonoka.Agent(
-        name="weather-bot",
-        tools=[get_weather],
+        model="gpt-4o",
+        tools=[get_weather, get_time],
     )
-    result = await agent.run("What's the weather in Tokyo?")
-    print(result.output)
+    runner = nonoka.Runner()          # execution coordinator
+    result = await runner.run_react(agent, "What's the weather in Tokyo?", deps=None)
+    print(result.data)                # result.data (not result.output)
 
 asyncio.run(main())
 ```
 
+> **Key concept:** `Agent` is a pure configuration object.  Execution is handled by `Runner`, which owns the LLM provider, checkpoint store, and memory backend.
+
 ## Plans & Orchestration
 
-Explicit multi-step workflows with type-safe references:
+Explicit multi-step workflows with type-safe references, executed deterministically via `Runner.run_plan`:
 
 ```python
-from nonoka import PlanBuilder, ref
+from nonoka import PlanBuilder, ref, Runner
 
 plan = (
     PlanBuilder(objective="Research workflow")
@@ -68,8 +71,9 @@ plan = (
     .build()
 )
 
-executor = nonoka.PlanExecutor(plan=plan)
-result = await executor.run("Latest AI breakthroughs")
+runner = Runner()
+result = await runner.run_plan(agent, plan=plan, deps=None)
+print(result.data)
 ```
 
 ## Prompt Templates
@@ -94,8 +98,55 @@ output = tpl.render(style="bullet points", content=long_text)
 ## ReAct Agent
 
 ```python
-agent = nonoka.ReActAgent(tools=[search, calculator])
-result = await agent.run("What is 42 * the current temperature in Paris?")
+from nonoka import Agent, tool, Runner
+
+@tool
+async def search(query: str) -> dict:
+    ...
+
+@tool
+async def calculator(expr: str) -> float:
+    ...
+
+agent = Agent(model="gpt-4o", tools=[search, calculator])
+runner = Runner()
+result = await runner.run_react(agent, "What is 42 * the current temperature in Paris?", deps=None)
+print(result.data)
+```
+
+## Tool Responses
+
+Tools can return plain values or a `ToolResponse` to communicate pagination and metadata to the agent loop:
+
+```python
+from nonoka import ToolResponse, tool
+
+@tool
+async def search_web(ctx, query: str, cursor: str | None = None) -> ToolResponse:
+    results, next_cursor = await _do_search(query, cursor)
+    return ToolResponse(
+        data={"results": results, "query": query},
+        has_more=next_cursor is not None,
+        next_cursor=next_cursor,
+        suggested_next_step="Summarise the findings and stop searching."
+        if len(results) >= 5 else "Refine query and search again.",
+    )
+```
+
+## Gateway (IM Platform Integration)
+
+`Gateway` standardizes requests from QQ, Telegram, Discord, etc. and routes them to Agents, then pushes Agent outputs back to the original platforms.
+
+```python
+from nonoka.ext.gateway.core import Gateway
+from nonoka.ext.gateway.limiter import TokenBucketLimiter
+
+runner = Runner()
+gateway = Gateway(runner, limiter=TokenBucketLimiter(default_rate=1, default_burst=3))
+gateway.register_adapter(TelegramAdapter(token="..."))
+gateway.set_default_agent(agent)
+
+await gateway.start()
 ```
 
 ## Configuration
@@ -120,9 +171,11 @@ agents:
     model: deepseek-chat
     system_prompt: "You are a coding assistant."
 
+# Runner backend configuration (defaults are SQLite persistent)
+# Use "memory" / "disabled" for testing
 runner:
-  checkpoint: memory
-  memory: in_memory
+  checkpoint: sqlite        # or "memory", "disabled"
+  memory: sqlite            # or "in_memory", "disabled"
 
 defaults:
   model: deepseek-chat

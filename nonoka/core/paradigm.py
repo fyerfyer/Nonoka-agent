@@ -17,6 +17,7 @@ from nonoka.core.memory import MemoryRole
 from nonoka.core.errors import (
   ErrorPolicy,
   SafetyError,
+  ToolFatalError,
   TransientError,
   CancelledError,
   MaxTurnsExceeded,
@@ -205,6 +206,27 @@ class ReActAgent:
           _execute_limited(tc)
           for tc in response.tool_calls
         ], return_exceptions=True)
+
+        # Check for fatal errors (HALT / FAIL) before adding to memory.
+        # asyncio.gather(return_exceptions=True) swallows exceptions; we must
+        # re-raise or translate them into a terminal RunResult here.
+        # Only SafetyError (HALT) and ToolFatalError (FAIL) terminate the loop;
+        # other exceptions (e.g. ValueError from a missing tool) are still
+        # fed back to the LLM as observations so it can self-correct.
+        for tr in tool_results:
+          if isinstance(tr, (SafetyError, ToolFatalError)):
+            session.status = SessionStatus.FAILED
+            session.end_time = __import__("datetime").datetime.now()
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            error_type = "halted" if isinstance(tr, SafetyError) else "tool_error"
+            return RunResult(
+              success=False,
+              session=session,
+              error=str(tr),
+              error_type=error_type,
+            )
+          if isinstance(tr, asyncio.CancelledError):
+            raise tr
 
         # Track the last non-exception tool result for output_mode="last_tool_result"
         last_tool_result: Any = None
@@ -482,6 +504,27 @@ class ReActAgent:
           for tc in response.tool_calls
         ], return_exceptions=True)
 
+        # Check for fatal errors (HALT / FAIL) before streaming results.
+        # Only SafetyError (HALT) and ToolFatalError (FAIL) terminate;
+        # other exceptions are still streamed as tool_call_result events.
+        for item in tool_results:
+          if isinstance(item, (SafetyError, ToolFatalError)):
+            session.status = SessionStatus.FAILED
+            session.end_time = __import__("datetime").datetime.now()
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            error_type = "halted" if isinstance(item, SafetyError) else "tool_error"
+            yield StreamEvent(
+              type="error",
+              data={
+                "success": False,
+                "error": str(item),
+                "error_type": error_type,
+              },
+            )
+            return
+          if isinstance(item, asyncio.CancelledError):
+            raise item
+
         last_tool_result: Any = None
         for tr in reversed(tool_results):
           if isinstance(tr, tuple) and not isinstance(tr[1], Exception):
@@ -491,24 +534,41 @@ class ReActAgent:
 
         for item in tool_results:
           if isinstance(item, Exception):
-            tc_id = "unknown"
-            tc_name = ""
+            # Non-fatal exception (e.g. ValueError from missing tool) —
+            # stream as an error result so the LLM can self-correct.
             obs_text = f"Error: {type(item).__name__}: {item}"
-          else:
-            tc, tr = item
-            tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
-            tc_name = tc.get("function", {}).get("name", "")
-            obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
-
             yield StreamEvent(
               type="tool_call_result",
               data={
-                "tool_call_id": tc_id,
-                "name": tc_name,
-                "result_preview": str(tr)[:500],
-                "is_error": isinstance(tr, Exception),
+                "tool_call_id": "unknown",
+                "name": "",
+                "result_preview": obs_text[:500],
+                "is_error": True,
               },
             )
+            if session.memory is not None:
+              await session.memory.add(
+                obs_text,
+                MemoryRole.TOOL,
+                tool_call_id="unknown",
+                tool_name="",
+              )
+            continue
+
+          tc, tr = item
+          tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+          tc_name = tc.get("function", {}).get("name", "")
+          obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
+
+          yield StreamEvent(
+            type="tool_call_result",
+            data={
+              "tool_call_id": tc_id,
+              "name": tc_name,
+              "result_preview": str(tr)[:500],
+              "is_error": False,
+            },
+          )
 
           if session.memory is not None:
             await session.memory.add(
@@ -776,7 +836,9 @@ class ReActAgent:
       elif action.type == ToolErrorActionType.HALT:
         raise SafetyError(f"Halted on tool error: {exc}") from exc
       else:
-        raise
+        # FAIL — wrap in ToolFatalError so the ReAct loop knows to terminate
+        # rather than feed the error back to the LLM as an observation.
+        raise ToolFatalError(f"Tool execution failed: {exc}") from exc
 
     # Hook: tool end
     await runner.hooks.emit_tool_end(hook_ctx, name, arguments, result, error)
@@ -912,13 +974,31 @@ class ReActAgent:
       import difflib
       return difflib.SequenceMatcher(None, text_a, text_b).ratio() > threshold
 
+    def _is_error_result(res: Any) -> bool:
+      """Check whether a tool result indicates failure (raw Exception or
+      REPORT-policy dict with an ``error`` key)."""
+      if isinstance(res, Exception):
+        return True
+      if isinstance(res, dict) and "error" in res:
+        return True
+      return False
+
     # -- Heuristic 1: consecutive same tool (with has_more awareness) -----
     consecutive_count = 1
     for i in range(len(history) - 2, -1, -1):
       if history[i][0] == history[-1][0]:
+        prev_idx = len(result_history) - (len(history) - i)
+        # Repair-attempt exemption: if the previous call failed (result is an
+        # error/Exception) and arguments are different, the LLM is likely
+        # correcting its mistake — stop counting and do not treat this as a loop.
+        prev_result = result_history[prev_idx] if 0 <= prev_idx < len(result_history) else None
+        is_repair_attempt = (
+          _is_error_result(prev_result) and history[i][1] != history[-1][1]
+        )
+        if is_repair_attempt:
+          break
         # If the *previous* call's result said has_more=True, this call is
         # likely a legitimate pagination request — count it at half weight.
-        prev_idx = len(result_history) - (len(history) - i)
         if _has_more_true(prev_idx):
           consecutive_count += 0.5
         else:

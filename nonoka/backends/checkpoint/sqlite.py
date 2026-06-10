@@ -160,9 +160,10 @@ class SQLiteCheckpointStore(CheckpointStore):
 
       state = self._state_from_json(row["state_json"])
 
-      # Merge step-level updates (avoids N+1 load-mutate-save problem)
+      # Merge step-level updates (avoids N+1 load-mutate-save problem).
+      # ORDER BY updated_at ASC so later updates overwrite earlier ones.
       step_rows = conn.execute(
-        "SELECT step_id, update_type, payload_json FROM step_updates WHERE session_id = ?",
+        "SELECT step_id, update_type, payload_json FROM step_updates WHERE session_id = ? ORDER BY updated_at ASC",
         (session_id,),
       ).fetchall()
 
@@ -172,10 +173,19 @@ class SQLiteCheckpointStore(CheckpointStore):
         payload = json.loads(step_row["payload_json"])
 
         if update_type == "status":
-          state.step_statuses[step_id] = StepStatus(payload["status"])
+          new_status = StepStatus(payload["status"])
+          # Don't overwrite a terminal status (COMPLETED / FAILED) with a
+          # non-terminal one.  A later "status" row may race with an earlier
+          # "result" / "error" row when timestamps have identical resolution.
+          current = state.step_statuses.get(step_id)
+          if current in (StepStatus.COMPLETED, StepStatus.FAILED):
+            continue
+          state.step_statuses[step_id] = new_status
         elif update_type == "result":
           state.step_statuses[step_id] = StepStatus.COMPLETED
           state.completed_steps[step_id] = StepResult(data=payload["result"])
+          # A successful retry should clear any previous failure record.
+          state.failed_steps.pop(step_id, None)
         elif update_type == "error":
           state.step_statuses[step_id] = StepStatus.FAILED
           state.failed_steps[step_id] = StepFailure(
@@ -183,6 +193,8 @@ class SQLiteCheckpointStore(CheckpointStore):
             message=payload["error"]["message"],
             traceback=payload["error"].get("traceback"),
           )
+          # Ensure a failed step doesn't also carry a stale success record.
+          state.completed_steps.pop(step_id, None)
 
       return state
 

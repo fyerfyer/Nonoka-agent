@@ -113,3 +113,32 @@ def test_is_tool_response_false_for_plain_values():
   assert is_tool_response("hello") is False
   assert is_tool_response({"a": 1}) is False
   assert is_tool_response(42) is False
+
+
+# --------------------------------------------------------------------------- #
+# Partial ToolResponse shape (Bug fix: P3.1)
+# --------------------------------------------------------------------------- #
+
+def test_unwrap_tool_response_partial_shape_no_double_nesting():
+  """A dict containing ``result`` but missing ``has_more`` should be
+  treated as a partial ToolResponse shape and returned with ``has_more``
+  filled in, rather than wrapped again (which would create
+  ``{"result": {"result": 126}, "has_more": False}``)."""
+  result = unwrap_tool_response({"result": 126})
+  assert result == {"result": 126, "has_more": False}
+
+
+def test_unwrap_tool_response_partial_shape_preserves_extra_fields():
+  """A partial-shape dict should preserve any extra metadata fields."""
+  result = unwrap_tool_response({"result": {"items": [1, 2]}, "total_count": 5})
+  assert result["result"] == {"items": [1, 2]}
+  assert result["has_more"] is False
+  assert result["total_count"] == 5
+
+
+def test_unwrap_tool_response_full_shape_unchanged():
+  """A dict already containing both ``result`` and ``has_more`` should
+  be returned exactly as-is."""
+  original = {"result": {"items": [1, 2]}, "has_more": True, "next_cursor": "abc"}
+  result = unwrap_tool_response(original)
+  assert result is original

@@ -556,3 +556,107 @@ async def test_tool_invoke_expands_toolresponse():
   assert result["result"] == {"items": [1, 2]}
   assert result["has_more"] is True
   assert result["next_cursor"] == "page2"
+
+
+# --------------------------------------------------------------------------- #
+# Repair-attempt exemption (Bug fix: P1.3)
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_loop_detection_exempts_repair_attempt(mock_runner):
+  """When a tool fails first and then succeeds with corrected arguments,
+  it should NOT be treated as a loop (repair-attempt exemption)."""
+
+  from nonoka.core.errors import LogicError
+
+  @tool
+  async def strict_divide(ctx, numerator: int, denominator: int) -> float:
+    if denominator == 0:
+      raise LogicError("Cannot divide by zero")
+    return numerator / denominator
+
+  agent = Agent(
+    model="test",
+    tools=[strict_divide],
+    max_turns=5,
+  )
+
+  session = Session(session_id="repair-test", agent=agent, deps=None)
+  session.memory = WorkingMemory(session_id="repair-test", memory_backend=None)
+
+  # Turn 1: wrong argument (denominator=0) → fails (LogicError → REPORT)
+  # Turn 2: corrected argument (denominator=2) → succeeds
+  responses = [
+    LLMResponse(
+      content=None,
+      tool_calls=[_tool_call("strict_divide", {"numerator": 10, "denominator": 0}, "tc1")],
+    ),
+    LLMResponse(
+      content=None,
+      tool_calls=[_tool_call("strict_divide", {"numerator": 10, "denominator": 2}, "tc2")],
+    ),
+    LLMResponse(content="The result is 5.0."),
+  ]
+
+  mock_runner.llm.chat = AsyncMock(side_effect=responses)
+
+  paradigm = ReActAgent(max_repeated_tool_calls=2)
+  result = await paradigm.run(session, mock_runner, prompt="Divide 10 by 2")
+
+  assert result.success is True
+  loop_warnings = [
+    e for e in session.memory.entries
+    if e.role == MemoryRole.SYSTEM and ("loop" in e.content.lower() or "repeatedly" in e.content.lower())
+  ]
+  assert len(loop_warnings) == 0, "Repair attempt (fail then succeed with different args) should not trigger loop detection"
+
+
+@pytest.mark.asyncio
+async def test_loop_detection_exempts_self_healing_tool(mock_runner):
+  """A self-healing tool that fails once then succeeds should not trigger
+  loop detection — this is the exact scenario from the bug report."""
+
+  from nonoka.core.errors import LogicError
+
+  call_count = 0
+
+  @tool
+  async def self_healing_tool(ctx, mode: str) -> str:
+    nonlocal call_count
+    call_count += 1
+    if call_count == 1:
+      raise LogicError("First attempt fails")
+    return "healed"
+
+  agent = Agent(
+    model="test",
+    tools=[self_healing_tool],
+    max_turns=5,
+  )
+
+  session = Session(session_id="heal-test", agent=agent, deps=None)
+  session.memory = WorkingMemory(session_id="heal-test", memory_backend=None)
+
+  responses = [
+    LLMResponse(
+      content=None,
+      tool_calls=[_tool_call("self_healing_tool", {"mode": "aggressive"}, "tc1")],
+    ),
+    LLMResponse(
+      content=None,
+      tool_calls=[_tool_call("self_healing_tool", {"mode": "gentle"}, "tc2")],
+    ),
+    LLMResponse(content="Healed successfully."),
+  ]
+
+  mock_runner.llm.chat = AsyncMock(side_effect=responses)
+
+  paradigm = ReActAgent(max_repeated_tool_calls=2)
+  result = await paradigm.run(session, mock_runner, prompt="Heal the system")
+
+  assert result.success is True
+  loop_warnings = [
+    e for e in session.memory.entries
+    if e.role == MemoryRole.SYSTEM and ("loop" in e.content.lower() or "repeatedly" in e.content.lower())
+  ]
+  assert len(loop_warnings) == 0, "Self-healing pattern (1 fail + 1 success with different args) should not trigger loop"

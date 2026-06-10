@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nonoka"
-version = "1.1.3"
+version = "1.1.6"
 description = "A production-grade, type-safe Python Agent framework"
 authors = [
     {name = "fyerfyer", email = "fyerfyer@126.com"}
@@ -49,8 +49,8 @@ Issues = "https://github.com/fyerfyer/nonoka/issues"
 
 [dependency-groups]
 dev = [
-    "pytest>=9.0.3",
-    "pytest-asyncio>=1.4.0",
+  "pytest>=9.0.3",
+  "pytest-asyncio>=1.4.0",
 ]
 
 [tool.pytest.ini_options]

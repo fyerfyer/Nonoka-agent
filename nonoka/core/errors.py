@@ -49,6 +49,17 @@ class MaxStepsExceeded(AgentError):
   pass
 
 
+class ToolFatalError(AgentError):
+  """Tool execution failed with a fatal error that should terminate the run.
+
+  Raised when ErrorPolicy decides ``FAIL`` or ``HALT``.  The ReAct loop
+  catches this (but not generic exceptions) to produce a terminal
+  ``RunResult`` instead of feeding the error back to the LLM as an
+  observation.
+  """
+  pass
+
+
 class ToolErrorActionType(str, Enum):
   RETRY = "retry"
   HALT = "halt"

@@ -106,6 +106,8 @@ def unwrap_tool_response(value: Any) -> dict[str, Any]:
 
   * ``ToolResponse`` → expanded dict with metadata.
   * Dict already containing ``result`` + ``has_more`` → returned as-is.
+  * Dict containing ``result`` but missing ``has_more`` → ``has_more`` is
+    filled in as ``False`` and the dict is returned without double-nesting.
   * Plain value → ``{"result": value, "has_more": false}``.
 
   This ensures the LLM always sees a consistent format regardless of
@@ -116,4 +118,9 @@ def unwrap_tool_response(value: Any) -> dict[str, Any]:
     return value.to_dict()
   if isinstance(value, dict) and "result" in value and "has_more" in value:
     return value
+  # If a dict already contains ``result`` but is missing ``has_more``,
+  # treat it as a partial ToolResponse shape and fill in the missing field
+  # rather than wrapping it again (which would create double nesting).
+  if isinstance(value, dict) and "result" in value:
+    return {**value, "has_more": value.get("has_more", False)}
   return {"result": value, "has_more": False}

@@ -346,3 +346,45 @@ async def test_gateway_custom_resolve_agent():
     GatewayMessage(message_id="2", sender="u", platform="t", chat_id="c", content="hello")
   )
   assert resolved.model == "default"
+
+
+# --------------------------------------------------------------------------- #
+# Multiple gateways on same runner (Bug fix: P3.4)
+# --------------------------------------------------------------------------- #
+
+def test_multiple_gateways_do_not_overwrite():
+  """Binding multiple Gateways to the same Runner should keep all of them,
+  not overwrite the previous one."""
+  runner = Runner()
+  gateway1 = Gateway(runner)
+  gateway2 = Gateway(runner)
+
+  assert runner.gateway is gateway2  # primary is the most recently added
+  assert gateway1 in runner._gateways
+  assert gateway2 in runner._gateways
+  assert len(runner._gateways) == 2
+
+
+@pytest.mark.asyncio
+async def test_gateway_add_gateway_idempotent():
+  """Adding the same gateway twice should not duplicate it."""
+  runner = Runner()
+  gateway = Gateway(runner)
+
+  assert len(runner._gateways) == 1
+  runner.add_gateway(gateway)
+  assert len(runner._gateways) == 1, "Adding the same gateway twice should be idempotent"
+
+
+@pytest.mark.asyncio
+async def test_runner_gateway_property_backward_compatible():
+  """Setting runner.gateway = gw should still work (backward compatibility)."""
+  runner = Runner()
+  gw1 = Gateway(runner)
+  gw2 = Gateway(runner)
+
+  # Setting gateway explicitly should replace all
+  runner.gateway = gw1
+  assert runner.gateway is gw1
+  assert len(runner._gateways) == 1
+  assert gw2 not in runner._gateways
