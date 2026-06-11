@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .agent import Agent
+from .agent_tool import AgentTool, MemoryStrategy
 from .tool import tool
 from .types import Capability, RetryPolicy, RunResult
 from .registry import ToolRegistry
@@ -43,6 +44,8 @@ from .system_prompts import SystemPromptTemplate
 
 __all__ = [
   "Agent",
+  "AgentTool",
+  "MemoryStrategy",
   "tool",
   "Capability",
   "RetryPolicy",

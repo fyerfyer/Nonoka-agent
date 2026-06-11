@@ -3,6 +3,7 @@ from __future__ import annotations
 """Nonoka — Deterministic orchestration meets conversational execution."""
 
 from nonoka.core.agent import Agent
+from nonoka.core.agent_tool import AgentTool, MemoryStrategy
 from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
 from nonoka.core.types import RunResult, RetryPolicy
@@ -42,6 +43,8 @@ from nonoka.core.builder import AgentBuilder, RunnerBuilder
 __all__ = [
   # Core
   "Agent",
+  "AgentTool",
+  "MemoryStrategy",
   "tool",
   "RunContext",
   "RunResult",

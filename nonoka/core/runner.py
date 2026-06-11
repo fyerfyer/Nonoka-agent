@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+import weakref
 from collections.abc import AsyncIterator
 from typing import Any, TypeVar
 
@@ -248,9 +249,11 @@ class Runner:
 
     session = Session(session_id=sid, agent=agent, deps=deps, memory=memory)
 
+    # Bind runner so AgentTool can access it via ctx.session._runner_ref
+    object.__setattr__(session, "_runner_ref", weakref.ref(self))
+
     # Bind gateway for reverse-channel push (tools can access ctx.gateway)
     if self._gateways:
-      import weakref
       # Bind the primary (first) gateway for reverse-channel push
       object.__setattr__(session, "_gateway_ref", weakref.ref(self._gateways[0]))
 
