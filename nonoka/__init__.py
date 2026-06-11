@@ -41,6 +41,7 @@ from nonoka.core.tool_response import (
 from nonoka.core.system_prompts import SystemPromptTemplate
 from nonoka.config import Config, ConfigLoadError
 from nonoka.core.builder import AgentBuilder, RunnerBuilder
+from nonoka.skills import Skill, SkillLoader
 
 __all__ = [
   # Core
@@ -84,6 +85,9 @@ __all__ = [
   "ConfigLoadError",
   "AgentBuilder",
   "RunnerBuilder",
+  # Skills
+  "Skill",
+  "SkillLoader",
   # Hot reload
   "PluginManager",
 ]

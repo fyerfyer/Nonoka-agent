@@ -52,16 +52,20 @@ class Agent(Generic[DepsT, ResultT]):
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 
+  # Skills — pre-configured capability packages expanded at construction time
+  skills: list["Skill"] = field(default_factory=list)
+
   # Metadata for routing, observability, and platform integration
   metadata: dict[str, Any] = field(default_factory=dict)
   tags: list[str] = field(default_factory=list)
 
   def __post_init__(self):
-    """Expand any ``ToolRegistry`` values in *tools* to plain capabilities.
+    """Expand any ``ToolRegistry`` values in *tools* and apply *skills*.
 
-    When a ``ToolRegistry`` is present the resulting ``tools`` field is
-    replaced by a ``ToolListProxy`` so that additions / removals in the
-    registry are visible to running Agents without reconstructing them.
+    1. ``ToolRegistry`` values are replaced by a ``ToolListProxy`` so that
+       runtime mutations (hot reload) are visible.
+    2. ``skills`` are merged into *tools*, *system_prompt*, and *metadata*.
+       The resulting Agent has ``skills=[]`` to avoid double-expansion.
     """
     from nonoka.core.registry import ToolRegistry
     from nonoka.core.hot_reload import ToolListProxy
@@ -79,6 +83,55 @@ class Agent(Generic[DepsT, ResultT]):
       proxy = ToolListProxy(flat_tools, registries)
       object.__setattr__(self, "tools", proxy)
     # If no registries were provided leave *tools* exactly as-is.
+
+    # ------------------------------------------------------------------ #
+    # Expand skills
+    # ------------------------------------------------------------------ #
+    if self.skills:
+      self._expand_skills()
+
+  def _expand_skills(self) -> None:
+    """Merge skills into tools, system_prompt, and metadata."""
+    from nonoka.core.hot_reload import ToolListProxy
+
+    # Resolve current tools (may be ToolListProxy after registry expansion)
+    current_tools: list[Capability]
+    if isinstance(self.tools, ToolListProxy):
+      current_tools = list(self.tools)
+    else:
+      current_tools = list(self.tools)
+
+    # Build merged tool map: Agent explicit tools have highest priority.
+    # Skills are applied in list order; later skills override earlier ones.
+    tool_map: dict[str, Capability] = {}
+    for skill in self.skills:
+      for tool in skill.tools:
+        tool_map[tool.name] = tool
+    for tool in current_tools:
+      tool_map[tool.name] = tool
+
+    merged_tools = list(tool_map.values())
+
+    # Merge system prompts: agent + each skill (system_prompt then activation_prompt)
+    parts: list[str] = []
+    if self.system_prompt:
+      parts.append(self.system_prompt)
+    for skill in self.skills:
+      if skill.system_prompt:
+        parts.append(skill.system_prompt)
+      if skill.activation_prompt:
+        parts.append(skill.activation_prompt)
+    merged_system_prompt = "\n\n".join(parts)
+
+    # Merge metadata: skill metadata takes precedence over Agent metadata
+    merged_metadata = dict(self.metadata)
+    for skill in self.skills:
+      merged_metadata.update(skill.metadata)
+
+    object.__setattr__(self, "tools", merged_tools)
+    object.__setattr__(self, "system_prompt", merged_system_prompt)
+    object.__setattr__(self, "metadata", merged_metadata)
+    object.__setattr__(self, "skills", [])
 
   # -- Config loading ------------------------------------------------------
 
