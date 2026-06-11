@@ -803,9 +803,12 @@ class ReActAgent:
       data={"tool": name, "arguments": arguments},
     ))
 
-    # Hook: tool start
+    # Hook: tool start (notification)
     hook_ctx = HookContext(session=session, runner=runner)
     await runner.hooks.emit_tool_start(hook_ctx, name, arguments)
+
+    # Hook: tool start intercept (can modify arguments)
+    arguments = await runner.hooks.emit_tool_start_intercept(hook_ctx, name, arguments)
 
     result: Any = None
     error: Exception | None = None
@@ -1259,9 +1262,12 @@ class PlanExecutor:
       data={"step_id": step.id, "tool": step.tool},
     ))
 
-    # Hook: plan step start
+    # Hook: plan step start (notification)
     hook_ctx = HookContext(session=session, runner=runner)
     await runner.hooks.emit_plan_step_start(hook_ctx, step.id, step.tool, resolved_args)
+
+    # Hook: tool start intercept (can modify arguments, shared with ReAct)
+    resolved_args = await runner.hooks.emit_tool_start_intercept(hook_ctx, step.tool, resolved_args)
 
     # Determine effective retry / timeout policy
     retry_policy = step.retry if step.retry else session.agent.default_retry

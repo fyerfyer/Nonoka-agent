@@ -49,6 +49,25 @@ class MaxStepsExceeded(AgentError):
   pass
 
 
+class HumanRejectedError(SafetyError):
+  """Human-in-the-loop rejected the operation.
+
+  Raised when a human approver explicitly rejects a tool call or plan step.
+  By default the ``ErrorPolicy`` maps this to ``HALT`` so the run terminates
+  rather than feeding the rejection back to the LLM as an observation.
+  """
+  pass
+
+
+class ApprovalTimeoutError(SafetyError):
+  """Human-in-the-loop approval request timed out.
+
+  Raised when an approver does not respond within the configured deadline.
+  The default disposition is ``HALT``.
+  """
+  pass
+
+
 class ToolFatalError(AgentError):
   """Tool execution failed with a fatal error that should terminate the run.
 

@@ -17,6 +17,8 @@ from nonoka.core.errors import (
   SafetyError,
   ResourceError,
   MaxTurnsExceeded,
+  HumanRejectedError,
+  ApprovalTimeoutError,
 )
 from nonoka.core.paradigm import (
   ReActAgent,
@@ -62,6 +64,8 @@ __all__ = [
   "SafetyError",
   "ResourceError",
   "MaxTurnsExceeded",
+  "HumanRejectedError",
+  "ApprovalTimeoutError",
   "ReActAgent",
   "PlanExecutor",
   "ReflectiveAgent",

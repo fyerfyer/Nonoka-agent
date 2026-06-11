@@ -57,6 +57,7 @@ SessionEndHook = Callable[["HookContext", "RunResult"], Awaitable[None] | None]
 LLMRequestHook = Callable[["HookContext", list["LLMMessage"], list[dict[str, Any]] | None], Awaitable[None] | None]
 LLMResponseHook = Callable[["HookContext", "LLMResponse"], Awaitable[None] | None]
 ToolStartHook = Callable[["HookContext", str, dict[str, Any]], Awaitable[None] | None]
+ToolStartInterceptHook = Callable[["HookContext", str, dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
 ToolEndHook = Callable[["HookContext", str, dict[str, Any], Any, Exception | None], Awaitable[None] | None]
 PlanStartHook = Callable[["HookContext"], Awaitable[None] | None]
 PlanStepStartHook = Callable[["HookContext", str, str, dict[str, Any]], Awaitable[None] | None]
@@ -138,6 +139,7 @@ class Hooks:
     "on_llm_request",
     "on_llm_response",
     "on_tool_start",
+    "on_tool_start_intercept",
     "on_tool_end",
     "on_plan_start",
     "on_plan_step_start",
@@ -151,6 +153,7 @@ class Hooks:
     on_llm_request: LLMRequestHook | list[LLMRequestHook] | None = None,
     on_llm_response: LLMResponseHook | list[LLMResponseHook] | None = None,
     on_tool_start: ToolStartHook | list[ToolStartHook] | None = None,
+    on_tool_start_intercept: ToolStartInterceptHook | list[ToolStartInterceptHook] | None = None,
     on_tool_end: ToolEndHook | list[ToolEndHook] | None = None,
     on_plan_start: PlanStartHook | list[PlanStartHook] | None = None,
     on_plan_step_start: PlanStepStartHook | list[PlanStepStartHook] | None = None,
@@ -215,6 +218,18 @@ class Hooks:
     """Decorator: register a tool-start hook."""
     return self._register("on_tool_start", fn)  # type: ignore[return-value]
 
+  def on_tool_start_intercept(self, fn: ToolStartInterceptHook) -> ToolStartInterceptHook:
+    """Decorator: register a tool-start intercept hook.
+
+    Intercept hooks can inspect and *modify* the arguments dict that will
+    be passed to the tool.  They are executed in order; each receives the
+    arguments returned by the previous hook.  The final dict is what the
+    tool actually receives.
+    """
+    self._store.setdefault("on_tool_start_intercept", [])
+    self._store["on_tool_start_intercept"].append(_normalize_hook(fn))  # type: ignore[arg-type]
+    return fn  # type: ignore[return-value]
+
   def on_tool_end(self, fn: ToolEndHook) -> ToolEndHook:
     """Decorator: register a tool-end hook."""
     return self._register("on_tool_end", fn)  # type: ignore[return-value]
@@ -249,6 +264,23 @@ class Hooks:
 
   async def emit_tool_start(self, ctx: HookContext, tool_name: str, arguments: dict[str, Any]) -> None:
     await _run_hooks(self._store.get("on_tool_start", []), ctx, tool_name, arguments)
+
+  async def emit_tool_start_intercept(self, ctx: HookContext, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Run intercept hooks sequentially, passing the return value through.
+
+    Each hook receives ``(ctx, tool_name, arguments)`` and must return a
+    dict (possibly modified).  The final dict is returned to the caller.
+
+    If no intercept hooks are registered, ``arguments`` is returned unchanged.
+    """
+    effective = arguments
+    for hook in self._store.get("on_tool_start_intercept", []):
+      effective = await hook(ctx, tool_name, effective)  # type: ignore[assignment,operator]
+      if not isinstance(effective, dict):
+        raise TypeError(
+          f"Intercept hook for '{tool_name}' must return a dict, got {type(effective).__name__}"
+        )
+    return effective
 
   async def emit_tool_end(
     self,

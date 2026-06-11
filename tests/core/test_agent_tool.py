@@ -1,9 +1,3 @@
-"""Unit tests for AgentTool — Agent-as-a-Tool capability.
-
-These tests exercise the core logic of AgentTool without involving real LLM
-calls.  LLM interactions are mocked at the provider level.
-"""
-
 from __future__ import annotations
 
 import pytest

@@ -1,17 +1,3 @@
-"""Real LLM integration tests for Agent-as-a-Tool (AgentTool).
-
-These tests use the actual DeepSeek API to verify:
-1. Parent Agent can delegate to a sub-agent via AgentTool
-2. Sub-agent executes independently and returns results
-3. Session isolation works (child does not see parent memory)
-4. Depth limiting prevents infinite agent nesting
-5. Memory inheritance gives child agent context from parent
-6. Cancel propagation stops sub-agent execution
-7. Error handling: sub-agent failure is reported to parent
-
-Requirements: OPENAI_API_KEY and OPENAI_BASE_URL in .env
-"""
-
 from __future__ import annotations
 
 import os
@@ -23,7 +9,6 @@ from dotenv import load_dotenv
 from nonoka import Agent, Runner, AgentTool, MemoryStrategy
 from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
-from nonoka.core.session import Session
 
 load_dotenv()
 

@@ -18,6 +18,8 @@ from .errors import (
   ResourceError,
   MaxTurnsExceeded,
   MaxStepsExceeded,
+  HumanRejectedError,
+  ApprovalTimeoutError,
 )
 from .paradigm import (
   ReActAgent,
@@ -67,6 +69,8 @@ __all__ = [
   "ResourceError",
   "MaxTurnsExceeded",
   "MaxStepsExceeded",
+  "HumanRejectedError",
+  "ApprovalTimeoutError",
   "ReActAgent",
   "PlanExecutor",
   "ReflectiveAgent",
