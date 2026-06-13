@@ -215,22 +215,54 @@ agent:
 ### Fluent Builder API
 
 ```python
-from nonoka import AgentBuilder, tool
+from nonoka import AgentBuilder, ToolRegistry, tool
 
 @tool
 async def get_weather(city: str) -> str:
     return f"Sunny in {city}!"
+
+registry = ToolRegistry()
+
+@registry.register
+async def search_city(name: str) -> str:
+    return f"Found {name}"
 
 agent = (
     AgentBuilder()
     .model("gpt-4o")
     .system_prompt("You are a weather assistant.")
     .tool(get_weather)
+    .tool_registry(registry)                 # add a whole registry
     .tool_by_import("my_tools.search:search_city")
     .max_turns(20)
     .retry(max_retries=5, backoff=1.5)
     .metadata(category="weather")
     .tag("production")
+    .build()
+)
+```
+
+You can also pass a `ToolRegistry` directly to `.tools()`:
+
+```python
+agent = AgentBuilder().model("gpt-4o").tools(registry).build()
+```
+
+### Skills
+
+Apply pre-packaged skills directly in the builder:
+
+```python
+from nonoka import AgentBuilder, Skill
+
+skill = Skill.from_file("skills/code-review.md")
+
+agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .system_prompt("You are a senior engineer.")
+    .skill(skill)
+    # or .skills(skill_a, skill_b)
     .build()
 )
 ```

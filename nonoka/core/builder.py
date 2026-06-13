@@ -17,18 +17,26 @@ class AgentBuilder:
 
   Usage::
 
-    from nonoka import AgentBuilder, tool
+    from nonoka import AgentBuilder, ToolRegistry, tool
 
     @tool
     async def get_weather(city: str) -> str:
       return f"Sunny in {city}!"
+
+    registry = ToolRegistry()
+
+    @registry.register
+    async def search_city(name: str) -> str:
+      return f"Found {name}"
 
     agent = (
       AgentBuilder()
       .model("gpt-4o")
       .system_prompt("You are a weather assistant.")
       .tool(get_weather)
+      .tool_registry(registry)
       .tool_by_import("my_tools.search:search_city")
+      .skill(my_skill)
       .max_turns(20)
       .retry(max_retries=5, backoff=1.5)
       .timeout(45.0)
@@ -41,6 +49,8 @@ class AgentBuilder:
   def __init__(self):
     self._model: str | None = None
     self._tools: list[Capability] = []
+    self._tool_registries: list[Any] = []
+    self._skills: list[Any] = []
     self._system_prompt: str = ""
     self._max_turns: int | None = None
     self._max_steps: int | None = None
@@ -82,9 +92,28 @@ class AgentBuilder:
     return self
 
   def tools(self, *capabilities: Capability | Any) -> AgentBuilder:
-    """Add multiple tools at once."""
+    """Add multiple tools at once.
+
+    Accepts ``Capability`` instances, raw callables, or ``ToolRegistry``
+    objects. Registries are kept separate so runtime mutations are visible
+    to the built Agent.
+    """
+    from nonoka.core.registry import ToolRegistry
+
     for cap in capabilities:
-      self.tool(cap)
+      if isinstance(cap, ToolRegistry):
+        self._tool_registries.append(cap)
+      else:
+        self.tool(cap)
+    return self
+
+  def tool_registry(self, registry: Any) -> AgentBuilder:
+    """Add a ``ToolRegistry`` whose contents are expanded at build time.
+
+    Registries are wrapped in a ``ToolListProxy`` so mutations made after
+    the Agent is built are still visible on subsequent tool lookups.
+    """
+    self._tool_registries.append(registry)
     return self
 
   def tool_by_import(self, import_path: str) -> AgentBuilder:
@@ -92,6 +121,18 @@ class AgentBuilder:
     from nonoka.config.resolver import _resolve_tool_entry
 
     self._tools.append(_resolve_tool_entry(import_path))
+    return self
+
+  # -- Skills ----------------------------------------------------------------
+
+  def skill(self, skill: Any) -> AgentBuilder:
+    """Add a single ``Skill`` to be applied when the Agent is built."""
+    self._skills.append(skill)
+    return self
+
+  def skills(self, *skills: Any) -> AgentBuilder:
+    """Add multiple ``Skill`` objects at once."""
+    self._skills.extend(skills)
     return self
 
   # -- Execution policy ------------------------------------------------------
@@ -156,9 +197,11 @@ class AgentBuilder:
     if self._model is None:
       raise ValueError("AgentBuilder: model is required. Call .model(...) before .build()")
 
+    tools: list[Capability | Any] = [*self._tools, *self._tool_registries]
+
     kwargs: dict[str, Any] = {
       "model": self._model,
-      "tools": self._tools,
+      "tools": tools,
       "system_prompt": self._system_prompt,
     }
     if self._max_turns is not None:
@@ -179,6 +222,8 @@ class AgentBuilder:
       kwargs["deps_type"] = self._deps_type
     if self._result_type is not None:
       kwargs["result_type"] = self._result_type
+    if self._skills:
+      kwargs["skills"] = self._skills
 
     return Agent(**kwargs)
 

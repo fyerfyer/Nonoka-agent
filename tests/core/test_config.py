@@ -456,6 +456,82 @@ def test_agent_builder_missing_model_raises():
     AgentBuilder().build()
 
 
+def test_agent_builder_with_tool_registry():
+  from nonoka.core.registry import ToolRegistry
+
+  registry = ToolRegistry()
+
+  @registry.register
+  async def registry_tool(x: str) -> str:
+    return f"registry: {x}"
+
+  agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .tool_registry(registry)
+    .build()
+  )
+
+  assert any(t.name == "registry_tool" for t in agent.tools)
+
+
+def test_agent_builder_tools_accepts_registry():
+  from nonoka.core.registry import ToolRegistry
+
+  registry = ToolRegistry()
+
+  @registry.register
+  async def another_registry_tool() -> str:
+    return "ok"
+
+  agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .tools(registry)
+    .build()
+  )
+
+  assert any(t.name == "another_registry_tool" for t in agent.tools)
+
+
+def test_agent_builder_with_skills(tmp_path):
+  from nonoka.skills import Skill
+
+  skill_file = tmp_path / "tester.md"
+  skill_file.write_text("---\nname: tester\nsystem_prompt: Always test.\n---\n")
+  skill = Skill.from_file(skill_file)
+
+  agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .system_prompt("You are helpful.")
+    .skill(skill)
+    .build()
+  )
+
+  assert "You are helpful." in agent.system_prompt
+  assert "Always test." in agent.system_prompt
+
+
+def test_agent_builder_with_multiple_skills(tmp_path):
+  from nonoka.skills import Skill
+
+  s1 = tmp_path / "s1.md"
+  s1.write_text("---\nname: s1\nsystem_prompt: First.\n---\n")
+  s2 = tmp_path / "s2.md"
+  s2.write_text("---\nname: s2\nsystem_prompt: Second.\n---\n")
+
+  agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .skills(Skill.from_file(s1), Skill.from_file(s2))
+    .build()
+  )
+
+  assert "First." in agent.system_prompt
+  assert "Second." in agent.system_prompt
+
+
 # --------------------------------------------------------------------------- #
 # RunnerBuilder
 # --------------------------------------------------------------------------- #
