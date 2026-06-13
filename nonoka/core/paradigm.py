@@ -466,11 +466,19 @@ class ReActAgent:
           session.end_time = __import__("datetime").datetime.now()
           await runner.checkpoint_store.save_session(session.session_id, session.to_state())
           final_data = self._extract_result_data(session, parsed_data)
+          duration = (
+            (session.end_time - session.start_time).total_seconds()
+            if session.start_time is not None
+            else None
+          )
           yield StreamEvent(
             type="final",
             data={
               "success": True,
               "data": final_data,
+              "turn_count": session.turn_count,
+              "tool_call_count": session.step_count,
+              "duration_seconds": duration,
             },
           )
           return

@@ -36,6 +36,12 @@ import asyncio
 from contextlib import AsyncExitStack
 from typing import Any, Protocol, runtime_checkable
 
+try:
+  from builtins import ExceptionGroup
+except ImportError:  # pragma: no cover
+  # Python < 3.11 does not have built-in ExceptionGroup.
+  ExceptionGroup = Exception  # type: ignore[misc,assignment]
+
 from nonoka.core.types import Capability
 from nonoka.core.context import RunContext
 from nonoka.core.logger import get_logger
@@ -139,10 +145,24 @@ class MCPClient:
 
   async def disconnect(self) -> None:
     """Close the connection and clean up resources."""
-    await self._exit_stack.aclose()
-    self._session = None
-    self._tools = []
-    self._capability_cache = {}
+    try:
+      await self._exit_stack.aclose()
+    except RuntimeError as exc:
+      # The stdio transport teardown can race with anyio cancel scopes
+      # when the event loop is shutting down. The subprocess is terminated
+      # in the process, so we treat this as a graceful shutdown.
+      if "cancel scope" in str(exc):
+        logger.debug("mcp.disconnect_cancel_scope_race", error=str(exc))
+      else:
+        raise
+    except ExceptionGroup as exc:
+      logger.debug("mcp.disconnect_exception_group", error=str(exc))
+    except asyncio.CancelledError:
+      logger.debug("mcp.disconnect_cancelled")
+    finally:
+      self._session = None
+      self._tools = []
+      self._capability_cache = {}
     logger.info("mcp.disconnected")
 
   async def __aenter__(self) -> MCPClient:
