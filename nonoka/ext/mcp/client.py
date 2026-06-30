@@ -182,6 +182,18 @@ class MCPClient:
       raise RuntimeError("MCPClient is not connected. Call connect() first.")
     return self._session
 
+  async def ping(self) -> bool:
+    """Ping the MCP server to verify the connection is alive.
+
+    Returns:
+      True if the server responds to the MCP ping.
+
+    Raises:
+      RuntimeError: If the client is not connected.
+    """
+    await self.session.send_ping()
+    return True
+
   async def list_tools(self) -> list[MCPTool]:
     """List tools exposed by the MCP server."""
     result = await self.session.list_tools()

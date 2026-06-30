@@ -125,6 +125,29 @@ class SQLiteCheckpointStore(CheckpointStore):
   # Protocol implementation
   # ------------------------------------------------------------------ #
 
+  async def delete_session(self, session_id: str) -> bool:
+    """Delete all persisted data for a session.
+
+    Returns:
+      True if any rows were deleted, False if the session did not exist.
+    """
+
+    def _delete() -> bool:
+      conn = self._ensure_connection()
+      cursor = conn.execute(
+        "DELETE FROM checkpoints WHERE session_id = ?",
+        (session_id,),
+      )
+      conn.execute(
+        "DELETE FROM step_updates WHERE session_id = ?",
+        (session_id,),
+      )
+      conn.commit()
+      return cursor.rowcount > 0
+
+    async with self._lock:
+      return await asyncio.to_thread(_delete)
+
   async def save_session(self, session_id: str, state: SessionState) -> None:
     """Persist a full session snapshot."""
 

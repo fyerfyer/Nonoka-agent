@@ -17,6 +17,13 @@ class MemoryCheckpointStore(CheckpointStore):
     self._sessions: dict[str, SessionState] = {}
     self._lock = asyncio.Lock()
 
+  async def delete_session(self, session_id: str) -> bool:
+    async with self._lock:
+      if session_id in self._sessions:
+        del self._sessions[session_id]
+        return True
+      return False
+
   async def save_session(self, session_id: str, state: SessionState) -> None:
     async with self._lock:
       self._sessions[session_id] = state.model_copy(deep=True)

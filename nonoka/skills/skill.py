@@ -33,6 +33,7 @@ class Skill:
   system_prompt: str = ""
   activation_prompt: str = ""
   metadata: dict[str, Any] = field(default_factory=dict)
+  source: str | None = None
 
   # ------------------------------------------------------------------ #
   # Parsing
@@ -53,7 +54,7 @@ class Skill:
     if not path.exists():
       raise FileNotFoundError(f"Skill file not found: {path}")
     content = path.read_text(encoding="utf-8")
-    return cls.from_string(content, source=str(path))
+    return cls.from_string(content, source=str(path.resolve()))
 
   @classmethod
   def from_string(cls, content: str, source: str = "<string>") -> Skill:
@@ -106,6 +107,7 @@ class Skill:
       system_prompt=frontmatter.get("system_prompt", ""),
       activation_prompt=body,
       metadata=frontmatter.get("metadata", {}),
+      source=source,
     )
 
   @classmethod

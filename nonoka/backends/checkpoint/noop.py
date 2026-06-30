@@ -14,6 +14,9 @@ class NoOpCheckpointStore(CheckpointStore):
     runner = Runner(checkpoint="disabled")
   """
 
+  async def delete_session(self, session_id: str) -> bool:
+    return False
+
   async def save_session(self, session_id: str, state: SessionState) -> None:
     pass
 

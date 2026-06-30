@@ -359,3 +359,50 @@ async def test_load_session_step_result_overrides_failed_status(memory_store):
   assert loaded.step_statuses["step-1"] == StepStatus.COMPLETED
   assert loaded.completed_steps["step-1"].data == "fixed"
   assert "step-1" not in loaded.failed_steps
+
+
+# --------------------------------------------------------------------------- #
+# Session deletion
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_delete_existing_session(memory_store):
+  """delete_session should remove the session and return True."""
+  state = _make_state(session_id="sess-delete")
+  await memory_store.save_session("sess-delete", state)
+
+  deleted = await memory_store.delete_session("sess-delete")
+  assert deleted is True
+
+  loaded = await memory_store.load_session("sess-delete")
+  assert loaded is None
+
+
+@pytest.mark.asyncio
+async def test_delete_nonexistent_session(memory_store):
+  """delete_session should return False for a session that does not exist."""
+  deleted = await memory_store.delete_session("sess-missing")
+  assert deleted is False
+
+
+@pytest.mark.asyncio
+async def test_delete_session_also_removes_step_updates(memory_store):
+  """delete_session should clean up both checkpoints and step_updates tables."""
+  state = _make_state(session_id="sess-with-steps", step_statuses={})
+  await memory_store.save_session("sess-with-steps", state)
+  await memory_store.save_step_result(
+    "sess-with-steps", "step-1", result="some data"
+  )
+
+  deleted = await memory_store.delete_session("sess-with-steps")
+  assert deleted is True
+
+  loaded = await memory_store.load_session("sess-with-steps")
+  assert loaded is None
+
+  # Re-saving the same session should not resurrect old step updates.
+  fresh_state = _make_state(session_id="sess-with-steps", step_statuses={})
+  await memory_store.save_session("sess-with-steps", fresh_state)
+  reloaded = await memory_store.load_session("sess-with-steps")
+  assert reloaded is not None
+  assert "step-1" not in reloaded.completed_steps

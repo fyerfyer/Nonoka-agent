@@ -12,7 +12,11 @@ async def test_mcp_stdio_filesystem_server():
     command="npx",
     args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
   ) as client:
-    # 1. List tools
+    # 1. Ping server
+    ping_ok = await client.ping()
+    assert ping_ok is True, "Expected ping to succeed"
+
+    # 2. List tools
     tools = await client.list_tools()
     assert len(tools) > 0, "Expected at least one tool from filesystem server"
 
