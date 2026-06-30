@@ -361,6 +361,49 @@ class Runner:
       )
       await self.hooks.emit_session_end(hook_ctx, result)
 
+  async def resume_approval(
+    self,
+    agent: Agent[DepsT, ResultT],
+    deps: DepsT,
+    session_id: str,
+    approvals: dict[str, dict[str, Any]],
+  ) -> AsyncIterator["StreamEvent"]:
+    """Resume a paused ReAct session after a human tool-call approval.
+
+    The session must exist in the checkpoint store and be in the ``PAUSED``
+    state.  Approved tools are executed, rejected ones are recorded as errors,
+    and the ReAct loop continues from there.
+    """
+    from nonoka.core.paradigm import ReActAgent
+    session = await self._create_session(agent, deps, session_id=session_id)
+    self._ensure_llm(agent)
+    paradigm = ReActAgent()
+    hook_ctx = HookContext(session=session, runner=self)
+    await self.hooks.emit_session_start(hook_ctx)
+    result_data: Any = None
+    result_success = False
+    result_error: str | None = None
+    result_error_type: str | None = None
+    try:
+      async for event in paradigm.resume_approval(session, self, approvals):
+        if event.type == "final":
+          result_data = event.data.get("data")
+          result_success = event.data.get("success", False)
+        elif event.type == "error":
+          result_success = False
+          result_error = event.data.get("error")
+          result_error_type = event.data.get("error_type")
+        yield event
+    finally:
+      result = RunResult(
+        success=result_success,
+        data=result_data,
+        session=session,
+        error=result_error,
+        error_type=result_error_type,
+      )
+      await self.hooks.emit_session_end(hook_ctx, result)
+
   async def run_plan(
     self,
     agent: Agent[DepsT, ResultT],
@@ -501,6 +544,7 @@ class StreamEvent(BaseModel):
   * ``content_delta`` — incremental LLM text.
   * ``tool_call_start`` — LLM requested one or more tools.
   * ``tool_call_result`` — a tool finished (success or error).
+  * ``approval_request`` — a tool call is waiting for human approval.
   * ``final`` — execution finished; ``data`` contains ``RunResult`` fields.
   * ``error`` — a terminal error occurred.
   """

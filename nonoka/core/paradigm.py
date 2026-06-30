@@ -15,6 +15,7 @@ from nonoka.core.logger import get_logger
 from nonoka.core.llm import LLMMessage, LLMMessageRole, LLMResponse
 from nonoka.core.memory import MemoryRole
 from nonoka.core.errors import (
+  ApprovalRequiredError,
   ErrorPolicy,
   SafetyError,
   ToolFatalError,
@@ -345,6 +346,97 @@ class ReActAgent:
     """Resume a conversational session from checkpoint."""
     return await self.run(session, runner, prompt="")
 
+  async def resume_approval(
+    self,
+    session: Session,
+    runner: Any,
+    approvals: dict[str, dict[str, Any]],
+  ) -> RunResult:
+    """Resume a session that is paused waiting for tool-call approvals.
+
+    Args:
+      session: The paused session (already loaded from checkpoint).
+      runner: The runner that owns the checkpoint store.
+      approvals: Mapping from tool_call_id to decision dict.
+        Each decision must contain ``approved: bool`` and optionally
+        ``modified_args: dict[str, Any]``.
+
+    Returns:
+      The final ``RunResult`` after executing approved tools and continuing
+      the ReAct loop.
+    """
+    if session.memory is None:
+      raise RuntimeError("Cannot resume approval: session has no memory.")
+
+    # Find the last assistant message that contains pending tool_calls.
+    pending_tool_calls: list[dict[str, Any]] = []
+    assistant_entry_index: int | None = None
+    for i in range(len(session.memory.entries) - 1, -1, -1):
+      entry = session.memory.entries[i]
+      if entry.role == MemoryRole.ASSISTANT and entry.metadata.get("tool_calls"):
+        pending_tool_calls = list(entry.metadata["tool_calls"])
+        assistant_entry_index = i
+        break
+
+    if not pending_tool_calls:
+      raise RuntimeError("No pending tool calls found for approval resume.")
+
+    # Execute each pending tool call according to the decision.
+    for tc in pending_tool_calls:
+      tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+      decision = approvals.get(tc_id, {"approved": False})
+      approved = bool(decision.get("approved", False))
+      modified_args = decision.get("modified_args")
+
+      if not approved:
+        reason = decision.get("reason", "Execution not approved.")
+        result = {"error": f"Approval denied: {reason}", "approved": False}
+        await session.memory.add(
+          json.dumps(result, ensure_ascii=False, default=str),
+          MemoryRole.TOOL,
+          tool_call_id=tc_id,
+          tool_name=tc.get("function", {}).get("name", ""),
+        )
+        continue
+
+      # Apply modified args if provided.
+      if modified_args is not None:
+        tc = dict(tc)
+        tc["function"] = dict(tc.get("function", {}))
+        tc["function"]["arguments"] = modified_args
+
+      try:
+        result = await self._execute_tool_call(session, runner, tc)
+      except Exception as exc:
+        result = {"error": f"{type(exc).__name__}: {exc}", "approved": True}
+
+      await session.memory.add(
+        json.dumps(result, ensure_ascii=False, default=str) if not isinstance(result, str) else result,
+        MemoryRole.TOOL,
+        tool_call_id=tc_id,
+        tool_name=tc.get("function", {}).get("name", ""),
+      )
+
+    session.status = SessionStatus.RUNNING
+    session.end_time = None
+    await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+    # Continue the ReAct loop.  The next LLM call will see the assistant
+    # tool_calls plus the newly injected tool results.
+    async for _ in self.run_stream(session, runner, prompt=""):
+      # We use the non-streaming wrapper because resume_approval returns a
+      # single RunResult.  The stream is consumed internally.
+      pass
+
+    # Status is updated by run_stream; reconstruct a result from session.
+    return RunResult(
+      success=session.status == SessionStatus.COMPLETED,
+      data=getattr(session, "_last_tool_result", None),
+      session=session,
+      error=None if session.status == SessionStatus.COMPLETED else "Approval resume did not complete",
+      error_type=None if session.status == SessionStatus.COMPLETED else "approval_resume_incomplete",
+    )
+
   async def run_stream(
     self,
     session: Session,
@@ -533,6 +625,44 @@ class ReActAgent:
           if isinstance(item, asyncio.CancelledError):
             raise item
 
+        # HITL: if any tool call requires approval, pause the turn.
+        # The assistant message with tool_calls is already saved in memory,
+        # so we can resume later with the user's decisions.
+        if any(isinstance(item, ApprovalRequiredError) for item in tool_results):
+          session.status = SessionStatus.PAUSED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+          for tc in response.tool_calls:
+            func = tc.get("function", {})
+            tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+            tc_name = func.get("name", "")
+            tc_args = func.get("arguments", "{}")
+            if isinstance(tc_args, str):
+              try:
+                tc_args = json.loads(tc_args)
+              except json.JSONDecodeError:
+                tc_args = {}
+            yield StreamEvent(
+              type="approval_request",
+              data={
+                "tool_call_id": tc_id,
+                "tool_name": tc_name,
+                "args": tc_args,
+              },
+            )
+
+          yield StreamEvent(
+            type="final",
+            data={
+              "success": False,
+              "requires_approval": True,
+              "error": "Pending human approval",
+              "error_type": "approval_required",
+            },
+          )
+          return
+
         last_tool_result: Any = None
         for tr in reversed(tool_results):
           if isinstance(tr, tuple) and not isinstance(tr[1], Exception):
@@ -574,6 +704,7 @@ class ReActAgent:
               "tool_call_id": tc_id,
               "name": tc_name,
               "result_preview": str(tr)[:500],
+              "result": tr,
               "is_error": False,
             },
           )

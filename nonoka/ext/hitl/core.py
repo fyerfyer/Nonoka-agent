@@ -78,6 +78,7 @@ class HumanCheckpoint:
   """
 
   checkpoint_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+  tool_call_id: str = ""  # Identifier of the pending tool call (for resumable HITL)
   trigger: str = ""  # e.g. "tool_call:edit_file"
   description: str = ""  # Human-readable summary
   context: dict[str, Any] = field(default_factory=dict)  # session_id, turn_count, etc.

@@ -167,10 +167,25 @@ class PluginManager:
         raise ImportError(
           f"Function '{func_name}' not found in {file_path}"
         )
+      # Already decorated with @tool — use as-is.
+      if isinstance(func, Capability) or hasattr(func, "invoke"):
+        self.registry.add(func)
+        self._provenance.setdefault(str(path), []).append(func.name)
+        return func
       capability = make_tool(func, description=description, default_timeout=default_timeout)
       self.registry.add(capability)
       self._provenance.setdefault(str(path), []).append(capability.name)
       return capability
+
+    def _callable_module(obj: object) -> str | None:
+      """Return the module a callable was originally defined in.
+
+      Tool instances are defined in ``nonoka.core.tool`` at the class level,
+      so we inspect the wrapped function instead.
+      """
+      if isinstance(obj, Capability) and hasattr(obj, "_func"):
+        return getattr(getattr(obj, "_func"), "__module__", None)
+      return getattr(obj, "__module__", None)
 
     # Auto-discover: all callables that look like tools
     loaded: list[Capability] = []
@@ -178,10 +193,16 @@ class PluginManager:
       if attr_name.startswith("_"):
         continue
       obj = getattr(module, attr_name)
+      # Already decorated with @tool — use as-is.
+      if isinstance(obj, Capability) or hasattr(obj, "invoke"):
+        if _callable_module(obj) == module_name:
+          self.registry.add(obj)
+          loaded.append(obj)
+        continue
       if not callable(obj) or inspect.isclass(obj):
         continue
       # Skip functions from stdlib / other modules
-      if getattr(obj, "__module__", None) != module_name:
+      if _callable_module(obj) != module_name:
         continue
       capability = make_tool(obj, default_timeout=default_timeout)
       self.registry.add(capability)

@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from nonoka.core.hooks import Hooks, HookContext
-from nonoka.core.errors import HumanRejectedError, ApprovalTimeoutError
+from nonoka.core.errors import (
+  ApprovalRequiredError,
+  HumanRejectedError,
+  ApprovalTimeoutError,
+)
 from nonoka.ext.hitl.core import (
   HumanApprover,
   HumanCheckpoint,
@@ -42,6 +46,11 @@ class HumanInTheLoopHooks(Hooks):
     default_action: What to do when no rule matches.  ``"allow"`` (default)
       lets the call proceed without approval; ``"approve"`` forces approval
       for every call.
+    deferred: If ``True``, the hook raises ``ApprovalRequiredError`` instead
+      of blocking to wait for a human decision.  The caller is responsible
+      for collecting the decision and resuming execution later.  This mode
+      is intended for integrations like nonoka-cli where the approval UI
+      lives in a separate process.
   """
 
   def __init__(
@@ -49,12 +58,14 @@ class HumanInTheLoopHooks(Hooks):
     approver: HumanApprover,
     rules: list[ToolRule] | None = None,
     default_action: str = "allow",
+    deferred: bool = False,
     **hooks_kwargs: Any,
   ):
     super().__init__(**hooks_kwargs)
     self.approver = approver
     self.rules = list(rules) if rules is not None else []
     self.default_action = default_action
+    self.deferred = deferred
 
   # -- Subclass hook override ------------------------------------------- #
 
@@ -87,6 +98,19 @@ class HumanInTheLoopHooks(Hooks):
       },
       original_args=arguments,
     )
+
+    # Deferred mode: raise immediately so the caller can surface the request
+    # in an external UI and resume later.
+    if self.deferred:
+      raise ApprovalRequiredError(
+        tool_call_id=checkpoint.checkpoint_id,
+        tool_name=tool_name,
+        args=arguments,
+        message=(
+          f"Approval required for tool '{tool_name}' "
+          f"(checkpoint {checkpoint.checkpoint_id})"
+        ),
+      )
 
     # Request approval
     resolved = await self.approver.request_approval(checkpoint)

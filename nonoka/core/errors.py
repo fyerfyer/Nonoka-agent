@@ -59,6 +59,37 @@ class HumanRejectedError(SafetyError):
   pass
 
 
+class ApprovalRequiredError(AgentError):
+  """A tool call requires external human approval before it can execute.
+
+  This is raised by HITL interceptors when the policy decides that a tool
+  call must be deferred to a human.  The caller is expected to:
+
+  1. Present the pending tool call to the user.
+  2. Collect an approval decision (approve / modify / reject).
+  3. Resume execution with the approved arguments.
+
+  Attributes:
+    tool_call_id: The identifier of the pending tool call.
+    tool_name: The name of the tool being called.
+    args: The arguments the model requested.
+  """
+
+  def __init__(
+    self,
+    tool_call_id: str,
+    tool_name: str,
+    args: dict[str, Any],
+    message: str | None = None,
+  ):
+    self.tool_call_id = tool_call_id
+    self.tool_name = tool_name
+    self.args = args
+    super().__init__(
+      message or f"Approval required for tool '{tool_name}' ({tool_call_id})"
+    )
+
+
 class ApprovalTimeoutError(SafetyError):
   """Human-in-the-loop approval request timed out.
 

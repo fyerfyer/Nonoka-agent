@@ -105,8 +105,8 @@ def _normalize_hook(fn: Callable[..., Any]) -> Callable[..., Awaitable[None]]:
   if inspect.iscoroutinefunction(fn):
     return fn  # type: ignore[return-value]
 
-  async def _wrapper(*args: Any, **kwargs: Any) -> None:
-    fn(*args, **kwargs)
+  async def _wrapper(*args: Any, **kwargs: Any) -> Any:
+    return fn(*args, **kwargs)
 
   return _wrapper
 
