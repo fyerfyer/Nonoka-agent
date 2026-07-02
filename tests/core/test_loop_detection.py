@@ -28,6 +28,7 @@ def mock_runner():
   runner.hooks.emit_llm_request = AsyncMock()
   runner.hooks.emit_llm_response = AsyncMock()
   runner.hooks.emit_tool_start = AsyncMock()
+  runner.hooks.emit_tool_start_intercept = AsyncMock(side_effect=lambda ctx, name, args: args)
   runner.hooks.emit_tool_end = AsyncMock()
   return runner
 

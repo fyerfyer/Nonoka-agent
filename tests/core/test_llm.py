@@ -8,9 +8,49 @@ from nonoka.core.llm import (
   LLMMessageRole,
   LiteLLMProvider,
   CircuitBreaker,
-  CircuitBreakerOpen
+  CircuitBreakerOpen,
+  _infer_litellm_provider_prefix,
 )
 from nonoka.core.types import RetryPolicy
+
+
+# --------------------------------------------------------------------------- #
+# Provider prefix inference
+# --------------------------------------------------------------------------- #
+
+def test_provider_prefix_inference():
+  """Common model families should get a LiteLLM provider prefix."""
+  assert _infer_litellm_provider_prefix("deepseek-chat") == "deepseek"
+  assert _infer_litellm_provider_prefix("deepseek-reasoner") == "deepseek"
+  assert _infer_litellm_provider_prefix("gpt-4o") == "openai"
+  assert _infer_litellm_provider_prefix("claude-sonnet-4-20250514") == "anthropic"
+  assert _infer_litellm_provider_prefix("gemini-2.0-flash") == "gemini"
+  assert _infer_litellm_provider_prefix("llama3.3") == "ollama"
+  assert _infer_litellm_provider_prefix("unknown-model") is None
+
+
+def test_litellm_provider_adds_provider_prefix():
+  """LiteLLMProvider should normalize bare model names to provider-prefixed form."""
+  provider = LiteLLMProvider(model="deepseek-chat")
+  assert provider.model == "deepseek/deepseek-chat"
+
+  provider = LiteLLMProvider(model="gpt-4o")
+  assert provider.model == "openai/gpt-4o"
+
+  provider = LiteLLMProvider(model="claude-sonnet-4-20250514")
+  assert provider.model == "anthropic/claude-sonnet-4-20250514"
+
+
+def test_litellm_provider_preserves_existing_prefix():
+  """Model strings that already include a provider prefix should be left alone."""
+  provider = LiteLLMProvider(model="openai/deepseek-chat")
+  assert provider.model == "openai/deepseek-chat"
+
+
+def test_litellm_provider_fallback_to_openai_with_base_url():
+  """Unrecognized models with a custom base_url fall back to openai/ prefix."""
+  provider = LiteLLMProvider(model="custom-model", base_url="https://api.example.com/v1")
+  assert provider.model == "openai/custom-model"
 
 
 # --------------------------------------------------------------------------- #

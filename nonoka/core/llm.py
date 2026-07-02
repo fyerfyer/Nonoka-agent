@@ -149,6 +149,32 @@ class LLMTransientError(Exception):
 import litellm
 
 
+def _infer_litellm_provider_prefix(model: str) -> str | None:
+  """Infer a LiteLLM provider prefix from a bare model name.
+
+  LiteLLM expects model identifiers in the form ``provider/model-name``
+  unless a recognized provider alias is used. This helper maps common
+  model families to their provider prefixes so users can configure
+  ``deepseek-chat`` instead of ``deepseek/deepseek-chat``.
+
+  Returns ``None`` when no known provider can be inferred.
+  """
+  lowered = model.lower()
+
+  if lowered.startswith(("gpt-", "o1", "o3", "text-")):
+    return "openai"
+  if lowered.startswith(("claude-", "sonnet", "opus", "haiku")):
+    return "anthropic"
+  if "deepseek" in lowered:
+    return "deepseek"
+  if lowered.startswith("gemini"):
+    return "gemini"
+  if lowered.startswith(("llama", "qwen", "mistral", "mixtral", "phi", "codellama")):
+    return "ollama"
+
+  return None
+
+
 class LiteLLMProvider:
   """
   Litellm-based default LLM gateway.
@@ -170,11 +196,18 @@ class LiteLLMProvider:
     circuit_breaker: CircuitBreaker | None = None,
     **kwargs: Any,
   ):
-    # LiteLLM needs a provider prefix when a custom base_url is used.
-    # Deepseek via OpenAI-compatible endpoint -> openai/deepseek-chat
-    # Only add prefix if the model string does not already contain one.
-    if base_url and "/" not in model:
-      model = f"openai/{model}"
+    # LiteLLM requires a provider prefix (e.g. "deepseek/deepseek-chat")
+    # when the model string does not already include one. Infer common
+    # providers from the model name so callers can write "deepseek-chat"
+    # instead of the more verbose "deepseek/deepseek-chat".
+    if "/" not in model:
+      prefix = _infer_litellm_provider_prefix(model)
+      if prefix:
+        model = f"{prefix}/{model}"
+      elif base_url:
+        # Custom OpenAI-compatible endpoint without a recognizable model
+        # name; fall back to the openai/ provider prefix.
+        model = f"openai/{model}"
     self.model = model
     self.api_key = api_key
     self.base_url = base_url

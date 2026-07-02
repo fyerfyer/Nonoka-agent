@@ -1177,19 +1177,28 @@ class ReActAgent:
     # -- Heuristic 4: result similarity -----------------------------------
     h4_triggered = False
     if len(result_history) >= 3 and len(history) >= 3:
-      # Compare last 3 results of the same tool
       last_tool = history[-1][0]
-      same_tool_results = [
-        result_history[i]
-        for i in range(len(history))
-        if history[i][0] == last_tool
-      ][-3:]
-      if len(same_tool_results) == 3:
-        if (
-          _results_similar(same_tool_results[0], same_tool_results[1])
-          and _results_similar(same_tool_results[1], same_tool_results[2])
+      # Only consider the most recent *consecutive* calls to the same tool.
+      # A different tool in between resets the window, which matches user
+      # expectations (e.g. search → edit → search is not a loop).
+      consecutive_same_tool_results: list[Any] = []
+      for i in range(len(history) - 1, -1, -1):
+        if history[i][0] == last_tool:
+          consecutive_same_tool_results.insert(0, result_history[i])
+        else:
+          break
+
+      if len(consecutive_same_tool_results) >= 3:
+        window = consecutive_same_tool_results[-3:]
+        # Pagination in progress — don't penalise similar-looking pages.
+        if not any(
+          isinstance(r, dict) and r.get("has_more") is True for r in window
         ):
-          h4_triggered = True
+          if (
+            _results_similar(window[0], window[1])
+            and _results_similar(window[1], window[2])
+          ):
+            h4_triggered = True
 
     loop_detected = h1_triggered or h2_triggered or h3_triggered or h4_triggered
 
