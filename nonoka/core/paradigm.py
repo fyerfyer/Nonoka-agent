@@ -646,6 +646,7 @@ class ReActAgent:
             yield StreamEvent(
               type="approval_request",
               data={
+                "id": f"approval_{tc_id}_{__import__('uuid').uuid4().hex[:8]}",
                 "tool_call_id": tc_id,
                 "tool_name": tc_name,
                 "args": tc_args,
