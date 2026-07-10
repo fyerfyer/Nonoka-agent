@@ -90,6 +90,37 @@ class ApprovalRequiredError(AgentError):
     )
 
 
+class ExternalToolExecutionRequiredError(AgentError):
+  """A tool call must be executed by an external host instead of nonoka.
+
+  This is raised when a capability is marked ``external=True``. The caller
+  (e.g. nonoka-cli bridge) is expected to:
+
+  1. Forward the pending tool call to the external host (e.g. OpenCode).
+  2. Collect the tool result from the host.
+  3. Resume execution by injecting the result with ``resume_external_tools``.
+
+  Attributes:
+    tool_call_id: The identifier of the pending tool call.
+    tool_name: The name of the tool being called.
+    arguments: The arguments the model requested.
+  """
+
+  def __init__(
+    self,
+    tool_call_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    message: str | None = None,
+  ):
+    self.tool_call_id = tool_call_id
+    self.tool_name = tool_name
+    self.arguments = arguments
+    super().__init__(
+      message or f"External execution required for tool '{tool_name}' ({tool_call_id})"
+    )
+
+
 class ApprovalTimeoutError(SafetyError):
   """Human-in-the-loop approval request timed out.
 

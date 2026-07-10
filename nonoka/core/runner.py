@@ -404,6 +404,49 @@ class Runner:
       )
       await self.hooks.emit_session_end(hook_ctx, result)
 
+  async def resume_external_tools(
+    self,
+    agent: Agent[DepsT, ResultT],
+    deps: DepsT,
+    session_id: str,
+    results: dict[str, Any],
+  ) -> AsyncIterator["StreamEvent"]:
+    """Resume a paused ReAct session after external tool execution.
+
+    The session must exist in the checkpoint store and be in the ``PAUSED``
+    state. Tool results supplied by the external host are injected into memory,
+    and the ReAct loop continues from there.
+    """
+    from nonoka.core.paradigm import ReActAgent
+    session = await self._create_session(agent, deps, session_id=session_id)
+    self._ensure_llm(agent)
+    paradigm = ReActAgent()
+    hook_ctx = HookContext(session=session, runner=self)
+    await self.hooks.emit_session_start(hook_ctx)
+    result_data: Any = None
+    result_success = False
+    result_error: str | None = None
+    result_error_type: str | None = None
+    try:
+      async for event in paradigm.resume_external_tools(session, self, results):
+        if event.type == "final":
+          result_data = event.data.get("data")
+          result_success = event.data.get("success", False)
+        elif event.type == "error":
+          result_success = False
+          result_error = event.data.get("error")
+          result_error_type = event.data.get("error_type")
+        yield event
+    finally:
+      result = RunResult(
+        success=result_success,
+        data=result_data,
+        session=session,
+        error=result_error,
+        error_type=result_error_type,
+      )
+      await self.hooks.emit_session_end(hook_ctx, result)
+
   async def run_plan(
     self,
     agent: Agent[DepsT, ResultT],

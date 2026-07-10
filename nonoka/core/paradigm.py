@@ -17,6 +17,7 @@ from nonoka.core.memory import MemoryRole
 from nonoka.core.errors import (
   ApprovalRequiredError,
   ErrorPolicy,
+  ExternalToolExecutionRequiredError,
   SafetyError,
   ToolFatalError,
   TransientError,
@@ -437,6 +438,89 @@ class ReActAgent:
       error_type=None if session.status == SessionStatus.COMPLETED else "approval_resume_incomplete",
     )
 
+  async def resume_external_tools(
+    self,
+    session: Session,
+    runner: Any,
+    results: dict[str, Any],
+  ) -> AsyncIterator[Any]:
+    """Resume a session paused for external tool execution.
+
+    The pending tool calls were forwarded to an external host (e.g. OpenCode)
+    and their results are supplied in *results*, keyed by tool_call_id. This
+    method injects the results into memory and continues the ReAct loop.
+
+    Args:
+      session: The paused session (already loaded from checkpoint).
+      runner: The runner that owns the checkpoint store.
+      results: Mapping from tool_call_id to the tool result returned by the
+        external host.
+
+    Yields:
+      StreamEvent objects from the continued ReAct loop.
+    """
+    from nonoka.core.runner import StreamEvent
+
+    if session.memory is None:
+      raise RuntimeError("Cannot resume external tools: session has no memory.")
+
+    # Find the last assistant message that contains pending tool_calls.
+    pending_tool_calls: list[dict[str, Any]] = []
+    assistant_entry_index: int | None = None
+    for i in range(len(session.memory.entries) - 1, -1, -1):
+      entry = session.memory.entries[i]
+      if entry.role == MemoryRole.ASSISTANT and entry.metadata.get("tool_calls"):
+        pending_tool_calls = list(entry.metadata["tool_calls"])
+        assistant_entry_index = i
+        break
+
+    if not pending_tool_calls:
+      raise RuntimeError("No pending tool calls found for external tool resume.")
+
+    # Determine which pending tool calls already have a result in memory.
+    existing_tool_ids: set[str] = set()
+    if assistant_entry_index is not None:
+      for entry in session.memory.entries[assistant_entry_index + 1:]:
+        if entry.role == MemoryRole.TOOL:
+          tc_id = entry.metadata.get("tool_call_id")
+          if tc_id:
+            existing_tool_ids.add(str(tc_id))
+
+    # Inject results for pending tool calls that are not already in memory.
+    for tc in pending_tool_calls:
+      tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+      tc_name = tc.get("function", {}).get("name", "")
+
+      if tc_id in existing_tool_ids:
+        continue
+
+      result = results.get(tc_id)
+      if result is None:
+        obs_text = json.dumps(
+          {"error": f"No result returned by external host for tool '{tc_name}'", "tool_call_id": tc_id},
+          ensure_ascii=False,
+          default=str,
+        )
+      elif not isinstance(result, str):
+        obs_text = json.dumps(result, ensure_ascii=False, default=str)
+      else:
+        obs_text = result
+
+      await session.memory.add(
+        obs_text,
+        MemoryRole.TOOL,
+        tool_call_id=tc_id,
+        tool_name=tc_name,
+      )
+
+    session.status = SessionStatus.RUNNING
+    session.end_time = None
+    await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+    # Continue the ReAct loop.
+    async for event in self.run_stream(session, runner, prompt=""):
+      yield event
+
   async def run_stream(
     self,
     session: Session,
@@ -624,6 +708,26 @@ class ReActAgent:
             return
           if isinstance(item, asyncio.CancelledError):
             raise item
+
+        # External tools: if any tool call must be executed by the host,
+        # pause the turn. The tool_call_start event was already emitted, so
+        # the caller can forward the call to the external host and resume
+        # later with the result.
+        if any(isinstance(item, ExternalToolExecutionRequiredError) for item in tool_results):
+          session.status = SessionStatus.PAUSED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+          yield StreamEvent(
+            type="final",
+            data={
+              "success": False,
+              "requires_external_execution": True,
+              "error": "Pending external tool execution",
+              "error_type": "external_tool_execution_required",
+            },
+          )
+          return
 
         # HITL: if any tool call requires approval, pause the turn.
         # The assistant message with tool_calls is already saved in memory,
@@ -949,6 +1053,14 @@ class ReActAgent:
 
     # Hook: tool start intercept (can modify arguments)
     arguments = await runner.hooks.emit_tool_start_intercept(hook_ctx, name, arguments)
+
+    # External tools are executed by the host (e.g. OpenCode), not by nonoka.
+    if getattr(capability, "external", False):
+      raise ExternalToolExecutionRequiredError(
+        tool_call_id=tool_call.get("id") or tool_call.get("tool_call_id", "unknown"),
+        tool_name=name,
+        arguments=arguments,
+      )
 
     result: Any = None
     error: Exception | None = None
