@@ -89,6 +89,8 @@ class Agent(Generic[DepsT, ResultT]):
     # ------------------------------------------------------------------ #
     if self.skills:
       self._expand_skills()
+    elif self.metadata.get("_skill_manager"):
+      self._expand_skills_lazy()
 
   def _expand_skills(self) -> None:
     """Merge skills into tools, system_prompt, and metadata."""
@@ -131,6 +133,44 @@ class Agent(Generic[DepsT, ResultT]):
     object.__setattr__(self, "tools", merged_tools)
     object.__setattr__(self, "system_prompt", merged_system_prompt)
     object.__setattr__(self, "metadata", merged_metadata)
+    object.__setattr__(self, "skills", [])
+
+  def _expand_skills_lazy(self) -> None:
+    """Lazy skill expansion: register tools but keep guidance on-demand.
+
+    The skill registry block (name + description) is injected into the system
+    prompt so the model knows which skills are available. The full skill
+    guidance is loaded via the ``load_skill`` tool when needed.
+    """
+    from nonoka.core.hot_reload import ToolListProxy
+    from nonoka.skills.registry import SkillRegistry
+
+    registry = self.metadata.get("_skill_manager")
+    if not isinstance(registry, SkillRegistry):
+      return
+
+    current_tools: list[Capability]
+    if isinstance(self.tools, ToolListProxy):
+      current_tools = list(self.tools)
+    else:
+      current_tools = list(self.tools)
+
+    tool_map: dict[str, Capability] = {}
+    for tool in registry.get_tools():
+      tool_map[tool.name] = tool
+    for tool in current_tools:
+      tool_map[tool.name] = tool
+
+    parts: list[str] = []
+    if self.system_prompt:
+      parts.append(self.system_prompt)
+    registry_block = registry.build_registry_block()
+    if registry_block:
+      parts.append(registry_block)
+    merged_system_prompt = "\n\n".join(parts)
+
+    object.__setattr__(self, "tools", list(tool_map.values()))
+    object.__setattr__(self, "system_prompt", merged_system_prompt)
     object.__setattr__(self, "skills", [])
 
   # -- Config loading ------------------------------------------------------

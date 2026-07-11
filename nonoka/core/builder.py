@@ -51,6 +51,7 @@ class AgentBuilder:
     self._tools: list[Capability] = []
     self._tool_registries: list[Any] = []
     self._skills: list[Any] = []
+    self._skill_manager: Any | None = None
     self._system_prompt: str = ""
     self._max_turns: int | None = None
     self._max_steps: int | None = None
@@ -133,6 +134,18 @@ class AgentBuilder:
   def skills(self, *skills: Any) -> AgentBuilder:
     """Add multiple ``Skill`` objects at once."""
     self._skills.extend(skills)
+    return self
+
+  def skill_manager(self, manager: Any) -> AgentBuilder:
+    """Set a SkillRegistry for lazy skill loading.
+
+    When a skill manager is provided, skills are exposed via a lightweight
+    registry block in the system prompt. Their tools are registered eagerly,
+    but their full guidance is only loaded when the model calls the
+    ``load_skill`` tool. This avoids bloating the system prompt with every
+    skill's activation prompt.
+    """
+    self._skill_manager = manager
     return self
 
   # -- Execution policy ------------------------------------------------------
@@ -222,7 +235,10 @@ class AgentBuilder:
       kwargs["deps_type"] = self._deps_type
     if self._result_type is not None:
       kwargs["result_type"] = self._result_type
-    if self._skills:
+    if self._skill_manager is not None:
+      metadata = kwargs.setdefault("metadata", {})
+      metadata["_skill_manager"] = self._skill_manager
+    elif self._skills:
       kwargs["skills"] = self._skills
 
     return Agent(**kwargs)

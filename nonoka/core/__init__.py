@@ -43,6 +43,7 @@ from .tool_response import (
   unwrap_tool_response,
 )
 from .system_prompts import SystemPromptTemplate
+from .external_tool import ExternalCapability
 
 __all__ = [
   "Agent",
@@ -87,4 +88,5 @@ __all__ = [
   "is_tool_response",
   "unwrap_tool_response",
   "SystemPromptTemplate",
+  "ExternalCapability",
 ]
