@@ -9,7 +9,9 @@ A production-grade, type-safe Python agent framework with deterministic orchestr
 - **Conversational execution** — `ReActAgent`, `ReflectiveAgent`, and `PlanExecutor` paradigms out of the box
 - **First-class tools** — `@tool` decorator with automatic Pydantic schema generation
 - **Prompt engineering** — `@prompt` decorator and `PromptTemplate` for composable, type-safe prompt construction
-- **MCP ready** — built-in MCP (Model Context Protocol) support via `mcp`
+- **MCP ready** — built-in MCP (Model Context Protocol) lifecycle manager (`MCPManager`) and client (`MCPClient`)
+- **Lazy skills** — discover and register skills without bloating the system prompt; load full guidance on demand via the `load_skill` tool
+- **External capabilities** — delegate tool execution to a host/frontend (e.g. OpenCode) using `ExternalCapability` and `resume_external_tools()`
 - **Resilient execution** — structured error taxonomy (`TransientError`, `LogicError`, `SafetyError`, etc.) with configurable `RetryPolicy`
 - **Observable hooks** — `Hooks` system for tracing, logging, and custom middleware
 - **Multi-backend LLM** — powered by `litellm`, supporting OpenAI, Anthropic, DeepSeek, and 100+ providers
@@ -266,6 +268,100 @@ agent = (
     .build()
 )
 ```
+
+### Lazy skill loading
+
+For projects with many skills, eagerly merging every skill into the system prompt can explode context length. Use `SkillRegistry` to expose only names and descriptions, and let the model call `load_skill` when it needs the full guidance:
+
+```python
+from nonoka import AgentBuilder, SkillRegistry, load_skill
+
+registry = SkillRegistry(enabled=["code-review", "nextjs-best-practices"])
+
+agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .skill_manager(registry)
+    .tool(load_skill)
+    .build()
+)
+```
+
+The `load_skill` tool injects the selected skill's `system_prompt` and `activation_prompt` into the conversation as a system message.
+
+### MCP servers
+
+Connect to external tools and resources via the Model Context Protocol (MCP). nonoka-agent provides a built-in `MCPManager` that handles server lifecycle (start, health checks, restart, shutdown) and exposes discovered tools as ordinary `Capability` objects:
+
+```python
+from nonoka import AgentBuilder, Runner
+from nonoka.ext.mcp import MCPManager, MCPServerConfig
+
+manager = MCPManager()
+
+configs = {
+    "filesystem": MCPServerConfig(
+        transport="stdio",
+        command="npx",
+        args=["-y", "@modelcontextprotocol/server-filesystem", "/home/user/docs"],
+    ),
+}
+
+async def main():
+    tools = await manager.start_all(configs)
+
+    agent = (
+        AgentBuilder()
+        .model("gpt-4o")
+        .system_prompt("Use the filesystem tools when needed.")
+        # Register MCP tools individually (or merge them into a ToolRegistry)
+        .tools(*[cap for _, cap in tools])
+        .build()
+    )
+
+    runner = Runner()
+    result = await runner.run_react(agent, "List the files in /home/user/docs")
+    print(result.data)
+
+    await manager.stop_all()
+```
+
+`MCPManager` supports stdio and sse transports, parallel startup, periodic health checks, and exponential-backoff restart.
+
+### External capabilities
+
+Some hosts (e.g. OpenCode) want to own tool execution and human-in-the-loop approval themselves. nonoka-agent supports this via `ExternalCapability`: the framework registers the tool schema and emits the tool call, but execution is delegated to the host. When the host returns a result, the session resumes with `Runner.resume_external_tools()`.
+
+```python
+from nonoka import AgentBuilder, Runner, ExternalCapability
+
+cap = ExternalCapability(
+    name="bash",
+    description="Run a shell command.",
+    parameters={
+        "type": "object",
+        "properties": {"command": {"type": "string"}},
+        "required": ["command"],
+    },
+)
+
+agent = AgentBuilder().model("gpt-4o").tool(cap).build()
+runner = Runner()
+
+# In the caller (e.g. nonoka-cli bridge):
+# 1. Run until ExternalToolExecutionRequiredError is raised.
+# 2. Forward the tool call to the external host.
+# 3. Resume with the host's result.
+async for event in runner.resume_external_tools(
+    agent,
+    deps=None,
+    session_id="session-123",
+    results={"call_abc": "Hello, world!"},
+):
+    print(event)
+```
+
+`ExternalCapability` carries `external=True` so the ReAct loop pauses instead of invoking the tool locally. This lets nonoka focus on decision-making while the host owns execution, permissions, and TUI rendering.
 
 ### From Dict / YAML / JSON
 
