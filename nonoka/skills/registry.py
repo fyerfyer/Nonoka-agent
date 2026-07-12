@@ -9,16 +9,17 @@ calls that do not require the full guidance.
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+import structlog
 
 from nonoka.core.types import Capability
 from nonoka.skills.loader import SkillLoader
 from nonoka.skills.skill import Skill
 
-_logger = logging.getLogger("nonoka.skills.registry")
+_logger = structlog.get_logger("nonoka.skills.registry")
 
 
 @dataclass(frozen=True)

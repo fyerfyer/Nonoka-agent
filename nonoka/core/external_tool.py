@@ -28,12 +28,14 @@ class ExternalCapability:
     name: Tool name exposed to the model.
     description: Tool description.
     parameters: JSON Schema for the tool's input parameters.
+    metadata: Optional routing metadata for the host. Not sent to the LLM.
   """
 
   name: str
   description: str
   parameters: dict[str, Any]
   external: bool = field(default=True, init=False)
+  metadata: dict[str, Any] = field(default_factory=dict)
 
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any:
     """Must never be called; execution is delegated to the host."""

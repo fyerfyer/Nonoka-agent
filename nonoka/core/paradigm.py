@@ -667,9 +667,24 @@ class ReActAgent:
             tool_calls=response.tool_calls,
           )
 
+        # Build a metadata map so hosts can route external tool calls without
+        # having to re-derive server/skill names from the prefixed tool name.
+        tool_metadata: dict[str, dict[str, Any]] = {}
+        for t in session.agent.tools:
+          meta = getattr(t, "metadata", None)
+          if meta:
+            tool_metadata[t.name] = dict(meta)
+
+        enriched_tool_calls = []
+        for tc in response.tool_calls:
+          tc_name = tc.get("function", {}).get("name", "")
+          enriched = dict(tc)
+          enriched["metadata"] = tool_metadata.get(tc_name) or {}
+          enriched_tool_calls.append(enriched)
+
         yield StreamEvent(
           type="tool_call_start",
-          data={"tool_calls": response.tool_calls},
+          data={"tool_calls": enriched_tool_calls},
         )
 
         num_tool_calls = len(response.tool_calls)

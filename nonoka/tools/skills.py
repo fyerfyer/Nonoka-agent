@@ -41,7 +41,7 @@ async def load_skill(ctx: RunContext, name: str) -> str:
     parts.append(skill.activation_prompt)
 
   if parts:
-    content = f"[Skill '{skill.name}' loaded]\n\n" + "\n\n".join(parts)
-    await ctx.session.memory.add(content, MemoryRole.SYSTEM)
+    guidance = f"[Skill '{skill.name}' loaded]\n\n" + "\n\n".join(parts)
+    return f"{guidance}\n\nSkill '{skill.name}' loaded. Use its guidance for the current task."
 
   return f"Skill '{skill.name}' loaded. Use its guidance for the current task."

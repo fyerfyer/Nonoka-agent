@@ -52,6 +52,7 @@ class AgentBuilder:
     self._tool_registries: list[Any] = []
     self._skills: list[Any] = []
     self._skill_manager: Any | None = None
+    self._external_mcp_registry: Any | None = None
     self._system_prompt: str = ""
     self._max_turns: int | None = None
     self._max_steps: int | None = None
@@ -148,6 +149,25 @@ class AgentBuilder:
     self._skill_manager = manager
     return self
 
+  def external_mcp_registry(self, registry: Any) -> AgentBuilder:
+    """Set a host-managed MCP registry.
+
+    The registry provides tool schemas for MCP servers whose lifecycle and
+    execution are handled by an external host. nonoka only registers the
+    prefixed schemas and emits tool calls; the host executes them and resumes
+    via ``resume_external_tools()``.
+    """
+    self._external_mcp_registry = registry
+    return self
+
+  def external_skill_registry(self, registry: Any) -> AgentBuilder:
+    """Set a host-managed skill registry.
+
+    This is a convenience alias for ``skill_manager`` because external skills
+    follow the same lazy-loading contract as internal skills.
+    """
+    return self.skill_manager(registry)
+
   # -- Execution policy ------------------------------------------------------
 
   def max_turns(self, value: int) -> AgentBuilder:
@@ -240,6 +260,10 @@ class AgentBuilder:
       metadata["_skill_manager"] = self._skill_manager
     elif self._skills:
       kwargs["skills"] = self._skills
+
+    if self._external_mcp_registry is not None:
+      metadata = kwargs.setdefault("metadata", {})
+      metadata["_external_mcp_registry"] = self._external_mcp_registry
 
     return Agent(**kwargs)
 

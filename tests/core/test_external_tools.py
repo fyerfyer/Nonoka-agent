@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from nonoka import Runner
+from nonoka import ExternalCapability, Runner
 from nonoka.core.agent import Agent
 from nonoka.core.context import RunContext
 from nonoka.core.errors import ExternalToolExecutionRequiredError
@@ -68,6 +68,19 @@ class _LocalCapability:
 def test_external_capability_has_external_marker():
   cap = _ExternalCapability("bash", "Run shell commands", {"type": "object", "properties": {}})
   assert cap.external is True
+
+
+def test_external_capability_metadata_not_in_schema():
+  cap = ExternalCapability(
+    name="bash",
+    description="Run shell commands",
+    parameters={"type": "object", "properties": {}},
+    metadata={"kind": "host_tool", "original_name": "bash"},
+  )
+  assert cap.metadata == {"kind": "host_tool", "original_name": "bash"}
+  schema = cap.to_json_schema()
+  assert schema["function"]["name"] == "bash"
+  assert "metadata" not in schema["function"]
 
 
 def test_external_capability_to_json_schema():

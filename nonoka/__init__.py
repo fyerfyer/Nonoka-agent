@@ -42,6 +42,16 @@ from nonoka.core.system_prompts import SystemPromptTemplate
 from nonoka.config import Config, ConfigLoadError
 from nonoka.core.builder import AgentBuilder, RunnerBuilder
 from nonoka.core.external_tool import ExternalCapability
+from nonoka.core.external_mcp import (
+  ExternalMCPRegistry,
+  ExternalMCPServer,
+  ExternalMCPToolDefinition,
+)
+from nonoka.core.external_skill import (
+  ExternalSkill,
+  ExternalSkillRegistry,
+  ExternalSkillToolDefinition,
+)
 from nonoka.skills import Skill, SkillLoader, SkillRegistry
 from nonoka.tools import load_skill
 
@@ -87,6 +97,14 @@ __all__ = [
   "ConfigLoadError",
   "AgentBuilder",
   "RunnerBuilder",
+  # External registries
+  "ExternalCapability",
+  "ExternalMCPRegistry",
+  "ExternalMCPServer",
+  "ExternalMCPToolDefinition",
+  "ExternalSkill",
+  "ExternalSkillRegistry",
+  "ExternalSkillToolDefinition",
   # Skills
   "Skill",
   "SkillLoader",
@@ -94,7 +112,6 @@ __all__ = [
   "load_skill",
   # Hot reload
   "PluginManager",
-  "ExternalCapability",
 ]
 
 

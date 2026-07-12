@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from nonoka.core.types import Capability
 from nonoka.core.tool import tool as make_tool
@@ -12,7 +13,7 @@ from nonoka.config.resolver import resolve_tool_import
 if TYPE_CHECKING:
   from nonoka.core.agent import Agent
 
-_logger = logging.getLogger("nonoka.skills")
+_logger = structlog.get_logger("nonoka.skills")
 
 
 @dataclass(frozen=True)

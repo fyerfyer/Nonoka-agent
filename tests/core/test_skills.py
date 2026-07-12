@@ -4,6 +4,7 @@ import tempfile
 from pathlib import Path
 
 import pytest
+import structlog
 
 from nonoka import Agent, Skill, SkillLoader, tool
 from nonoka.core.tool import Tool
@@ -327,20 +328,21 @@ def test_skill_loader_no_path_raises():
 # Error handling
 # --------------------------------------------------------------------------- #
 
-def test_skill_load_bad_file_logs_error(caplog):
+def test_skill_load_bad_file_logs_error():
   with tempfile.TemporaryDirectory() as tmpdir:
     tmp = Path(tmpdir)
     (tmp / "bad.md").write_text("not valid frontmatter")
 
     loader = SkillLoader(tmp)
-    with caplog.at_level("ERROR", logger="nonoka.skills"):
+    with structlog.testing.capture_logs() as cap_logs:
       skills = loader.load_all()
 
     assert skills == []
-    assert any("bad.md" in r.message for r in caplog.records)
+    messages = " ".join(str(e.get("event", "")) for e in cap_logs)
+    assert "bad.md" in messages
 
 
-def test_skill_parse_tool_import_failure_logs_warning(caplog):
+def test_skill_parse_tool_import_failure_logs_warning():
   content = """\
 ---
 name: bad-tools
@@ -351,9 +353,10 @@ tools:
 
 Body.
 """
-  with caplog.at_level("ERROR", logger="nonoka.skills"):
+  with structlog.testing.capture_logs() as cap_logs:
     skill = Skill.from_string(content)
 
   assert skill.name == "bad-tools"
   assert skill.tools == []
-  assert any("definitely.not.a.module" in r.message for r in caplog.records)
+  messages = " ".join(str(e.get("event", "")) for e in cap_logs)
+  assert "definitely.not.a.module" in messages

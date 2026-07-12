@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
+import structlog
+
 from nonoka.skills.skill import Skill
 
-_logger = logging.getLogger("nonoka.skills")
+_logger = structlog.get_logger("nonoka.skills")
 
 
 class SkillLoader:

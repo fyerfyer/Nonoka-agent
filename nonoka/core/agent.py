@@ -89,7 +89,7 @@ class Agent(Generic[DepsT, ResultT]):
     # ------------------------------------------------------------------ #
     if self.skills:
       self._expand_skills()
-    elif self.metadata.get("_skill_manager"):
+    elif self.metadata.get("_skill_manager") or self.metadata.get("_external_mcp_registry"):
       self._expand_skills_lazy()
 
   def _expand_skills(self) -> None:
@@ -141,12 +141,20 @@ class Agent(Generic[DepsT, ResultT]):
     The skill registry block (name + description) is injected into the system
     prompt so the model knows which skills are available. The full skill
     guidance is loaded via the ``load_skill`` tool when needed.
+
+    Also merges any host-managed external MCP registry so that external MCP
+    tools appear alongside skill tools with consistent namespacing.
     """
     from nonoka.core.hot_reload import ToolListProxy
+    from nonoka.core.external_mcp import ExternalMCPRegistry
     from nonoka.skills.registry import SkillRegistry
 
-    registry = self.metadata.get("_skill_manager")
-    if not isinstance(registry, SkillRegistry):
+    skill_registry = self.metadata.get("_skill_manager")
+    mcp_registry = self.metadata.get("_external_mcp_registry")
+    has_skill_registry = isinstance(skill_registry, SkillRegistry)
+    has_mcp_registry = isinstance(mcp_registry, ExternalMCPRegistry)
+
+    if not has_skill_registry and not has_mcp_registry:
       return
 
     current_tools: list[Capability]
@@ -156,17 +164,28 @@ class Agent(Generic[DepsT, ResultT]):
       current_tools = list(self.tools)
 
     tool_map: dict[str, Capability] = {}
-    for tool in registry.get_tools():
-      tool_map[tool.name] = tool
+    # Skill tools are merged first; explicit agent tools override them.
+    if has_skill_registry:
+      for tool in skill_registry.get_tools():
+        tool_map[tool.name] = tool
+    # External MCP tools are merged next; explicit agent tools override them.
+    if has_mcp_registry:
+      for tool in mcp_registry.get_tools():
+        tool_map[tool.name] = tool
     for tool in current_tools:
       tool_map[tool.name] = tool
 
     parts: list[str] = []
     if self.system_prompt:
       parts.append(self.system_prompt)
-    registry_block = registry.build_registry_block()
-    if registry_block:
-      parts.append(registry_block)
+    if has_skill_registry:
+      skill_block = skill_registry.build_registry_block()
+      if skill_block:
+        parts.append(skill_block)
+    if has_mcp_registry:
+      mcp_block = mcp_registry.build_registry_block()
+      if mcp_block:
+        parts.append(mcp_block)
     merged_system_prompt = "\n\n".join(parts)
 
     object.__setattr__(self, "tools", list(tool_map.values()))
