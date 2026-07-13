@@ -790,7 +790,10 @@ class ReActAgent:
             break
         session._last_tool_result = last_tool_result  # type: ignore[attr-defined]
 
-        for item in tool_results:
+        for tc, item in zip(response.tool_calls, tool_results):
+          tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+          tc_name = tc.get("function", {}).get("name", "")
+
           if isinstance(item, Exception):
             # Non-fatal exception (e.g. ValueError from missing tool) —
             # stream as an error result so the LLM can self-correct.
@@ -798,8 +801,8 @@ class ReActAgent:
             yield StreamEvent(
               type="tool_call_result",
               data={
-                "tool_call_id": "unknown",
-                "name": "",
+                "tool_call_id": tc_id,
+                "name": tc_name,
                 "result_preview": obs_text[:500],
                 "is_error": True,
               },
@@ -808,14 +811,12 @@ class ReActAgent:
               await session.memory.add(
                 obs_text,
                 MemoryRole.TOOL,
-                tool_call_id="unknown",
-                tool_name="",
+                tool_call_id=tc_id,
+                tool_name=tc_name,
               )
             continue
 
-          tc, tr = item
-          tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
-          tc_name = tc.get("function", {}).get("name", "")
+          tr = item[1]
           obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
 
           yield StreamEvent(

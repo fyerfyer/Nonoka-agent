@@ -47,6 +47,13 @@ Documentation = "https://github.com/fyerfyer/nonoka#readme"
 Repository = "https://github.com/fyerfyer/nonoka"
 Issues = "https://github.com/fyerfyer/nonoka/issues"
 
+[project.optional-dependencies]
+repo-map = [
+  "tree-sitter>=0.25.0",
+  "tree-sitter-language-pack>=1.0.0",
+  "multilspy>=0.0.15",
+]
+
 [dependency-groups]
 dev = [
   "pytest>=9.0.3",
