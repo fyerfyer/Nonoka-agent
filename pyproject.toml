@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nonoka"
-version = "1.3.3"
+version = "1.3.4"
 description = "A production-grade, type-safe Python Agent framework"
 authors = [
     {name = "fyerfyer", email = "fyerfyer@126.com"}
