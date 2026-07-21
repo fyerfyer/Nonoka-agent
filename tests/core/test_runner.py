@@ -7,7 +7,7 @@ from nonoka.core.agent import Agent
 from nonoka.core.tool import tool
 from nonoka.core.types import RetryPolicy
 from nonoka.core.runner import Runner, StreamEvent
-from nonoka.core.llm import LLMStreamChunk
+from nonoka.core.llm import LLMResponse, LLMStreamChunk
 from nonoka.backends.checkpoint.memory import MemoryCheckpointStore
 
 
@@ -64,11 +64,14 @@ async def test_runner_passes_retry_policy_to_llm():
 @pytest.mark.asyncio
 async def test_runner_run_react_stream_returns_events():
   """Runner.run_react_stream should yield StreamEvents."""
-  agent = Agent(model="test", tools=[], max_turns=1)
+  agent = Agent(model="test", tools=[], max_turns=1, temperature=0.2, max_tokens=321)
 
   runner = Runner()
 
+  captured = {}
+
   async def fake_stream(*args, **kwargs):
+    captured.update(kwargs)
     yield LLMStreamChunk(finish_reason="stop")
 
   provider = MagicMock()
@@ -83,6 +86,24 @@ async def test_runner_run_react_stream_returns_events():
 
   assert len(events) >= 1
   assert events[-1].type == "final"
+  assert captured["temperature"] == 0.2
+  assert captured["max_tokens"] == 321
+
+
+@pytest.mark.asyncio
+async def test_runner_forwards_agent_generation_config_to_react_provider():
+  agent = Agent(model="test", tools=[], max_turns=1, temperature=0.0, max_tokens=123)
+  runner = Runner()
+  provider = MagicMock()
+  provider.chat = AsyncMock(return_value=LLMResponse(content="ok"))
+  runner._create_llm = lambda _agent: provider  # type: ignore[method-assign]
+
+  result = await runner.run_react(agent, prompt="hello", deps=None)
+
+  assert result.success
+  provider.chat.assert_awaited_once()
+  assert provider.chat.call_args.kwargs["temperature"] == 0.0
+  assert provider.chat.call_args.kwargs["max_tokens"] == 123
 
 
 # --------------------------------------------------------------------------- #

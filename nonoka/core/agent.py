@@ -49,6 +49,8 @@ class Agent(Generic[DepsT, ResultT]):
   max_turns: int = 10
   max_steps: int = 50
   max_concurrency: int = 10  # Max concurrent tool calls within a single turn
+  temperature: float | None = None
+  max_tokens: int | None = None
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 

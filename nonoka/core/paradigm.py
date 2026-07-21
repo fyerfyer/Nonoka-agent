@@ -140,6 +140,8 @@ class ReActAgent:
           response = await runner.llm.chat(
             messages=messages,
             tools=tools or None,
+            temperature=session.agent.temperature,
+            max_tokens=session.agent.max_tokens,
           )
           await runner.hooks.emit_llm_response(hook_ctx, response)
         except CancelledError:
@@ -583,6 +585,8 @@ class ReActAgent:
           stream = runner.llm.chat_stream(
             messages=messages,
             tools=tools or None,
+            temperature=session.agent.temperature,
+            max_tokens=session.agent.max_tokens,
           )
         except CancelledError:
           raise

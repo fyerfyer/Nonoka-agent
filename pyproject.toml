@@ -50,6 +50,9 @@ Repository = "https://github.com/fyerfyer/nonoka"
 Issues = "https://github.com/fyerfyer/nonoka/issues"
 
 [project.optional-dependencies]
+eval = [
+  "datasets>=3.0.0",
+]
 repo-map = [
   "tree-sitter>=0.25.0",
   "tree-sitter-language-pack>=1.0.0",
@@ -66,3 +69,7 @@ dev = [
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "eval: deterministic agent-evaluation tests",
+  "live: tests that call a real LLM or external benchmark",
+]
