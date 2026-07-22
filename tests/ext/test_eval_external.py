@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 from nonoka.ext.eval import external
 
@@ -34,6 +35,7 @@ def test_tau2_runner_uses_isolated_interpreter_and_keeps_credentials_out_of_argv
   assert "--enforce-communication-protocol" in command
   assert "DEEPSEEK_API_KEY" not in " ".join(command)
   assert captured["env"]["NONOKA_TAU_BRIDGE_PYTHON"] == sys.executable
+  assert captured["env"]["NONOKA_TAU_EVALUATOR_MODEL"] == "deepseek-chat"
   assert output.is_dir()
 
 
@@ -142,3 +144,24 @@ def test_external_runner_reads_config_into_child_environment(monkeypatch, tmp_pa
 
   assert environment["OPENAI_API_KEY"] == "test-key"
   assert environment["OPENAI_BASE_URL"] == "https://example.invalid/v1"
+
+
+def test_evalplus_keeps_scored_result_when_verifier_returns_nonzero(monkeypatch, tmp_path):
+  interpreter = tmp_path / "evalplus-python"
+  interpreter.touch()
+  candidates = tmp_path / "candidates.jsonl"
+  candidates.write_text('{"task_id": "Mbpp/2", "solution": "pass"}\n')
+  result_path = tmp_path / "candidates_eval_results.json"
+
+  monkeypatch.setattr(
+    external, "EVALPLUS_BENCH",
+    SimpleNamespace(status=lambda: {"available": True, "interpreter": str(interpreter)}),
+  )
+
+  def fake_run(_command, **_kwargs):
+    result_path.write_text('{"eval": {}}\n')
+    return SimpleNamespace(returncode=1)
+
+  monkeypatch.setattr(external.subprocess, "run", fake_run)
+
+  assert external.run_evalplus("mbpp", candidates) == result_path

@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 
 from nonoka import Agent, Runner, Hooks, tool
 
+pytestmark = pytest.mark.live
+
 
 load_dotenv()
 

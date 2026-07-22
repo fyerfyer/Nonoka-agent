@@ -4,6 +4,7 @@ from nonoka.ext.eval.checkers import CodeChecker, ToolUseChecker
 from nonoka.ext.eval.datasets.builtins import load_tool_use
 from nonoka.ext.eval.models import EvalSample
 from nonoka.ext.eval.tools import EvalDeps
+from nonoka.ext.coding import WorkspaceDiff, WorkspaceMutation
 
 
 def test_code_checker_runs_functional_harness(tmp_path):
@@ -22,6 +23,7 @@ def test_tool_use_checker_requires_trace_and_exact_workspace(tmp_path):
   deps = EvalDeps(
     tmp_path,
     tool_trace=["read_file:incoming.txt", "write_file:cleaned.txt", "execute_python"],
+    mutations=[WorkspaceMutation("write_file", WorkspaceDiff(created=("cleaned.txt",)))],
   )
   assert ToolUseChecker().check(sample, tmp_path, deps)[0] is True
   missing_read = EvalDeps(tmp_path, tool_trace=["write_file:cleaned.txt", "execute_python"])

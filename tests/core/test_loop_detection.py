@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from nonoka.core.agent import Agent
 from nonoka.core.tool import tool
+from nonoka.core.execution import ToolExecution
 from nonoka.core.paradigm import ReActAgent
 from nonoka.core.memory import WorkingMemory, MemoryRole
 from nonoka.core.session import Session
@@ -54,7 +55,7 @@ def _tool_call(tool_name: str, args: dict, call_id: str = "tc") -> dict:
 
 from nonoka.core.tool_response import ToolResponse
 
-@tool
+@tool(execution=ToolExecution(read_only=True))
 async def search_tool(ctx, query: str) -> ToolResponse:
   return ToolResponse(
     data={"results": [f"result for {query}"]},
@@ -169,12 +170,55 @@ async def test_loop_detection_resets_on_different_tool(mock_runner):
 
 
 # --------------------------------------------------------------------------- #
+# Stateful progress-aware regression
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_stateful_terminal_commands_with_different_arguments_are_not_a_loop(mock_runner):
+  @tool(execution=ToolExecution(mutates_workspace=True, stateful_action=True))
+  async def execute_terminal(ctx, command: str) -> str:
+    return f"ran {command}"
+
+  agent = Agent(model="test", tools=[execute_terminal], max_turns=5)
+  session = Session(session_id="terminal-progress", agent=agent, deps=None)
+  session.memory = WorkingMemory(session_id="terminal-progress", memory_backend=None)
+  mock_runner.llm.chat = AsyncMock(side_effect=[
+    LLMResponse(tool_calls=[_tool_call("execute_terminal", {"command": "pwd"}, "tc1")]),
+    LLMResponse(tool_calls=[_tool_call("execute_terminal", {"command": "git status"}, "tc2")]),
+    LLMResponse(tool_calls=[_tool_call("execute_terminal", {"command": "pytest -q"}, "tc3")]),
+    LLMResponse(content="Done."),
+  ])
+
+  result = await ReActAgent().run(session, mock_runner, prompt="Fix it")
+  assert result.success is True
+  assert not any("Loop confirmed" in entry.content for entry in session.memory.entries)
+
+
+@pytest.mark.asyncio
+async def test_stateful_identical_no_progress_command_warns(mock_runner):
+  @tool(execution=ToolExecution(mutates_workspace=True, stateful_action=True))
+  async def execute_terminal(ctx, command: str) -> str:
+    return "unchanged"
+
+  agent = Agent(model="test", tools=[execute_terminal], max_turns=5)
+  session = Session(session_id="terminal-loop", agent=agent, deps=None)
+  session.memory = WorkingMemory(session_id="terminal-loop", memory_backend=None)
+  mock_runner.llm.chat = AsyncMock(side_effect=[
+    LLMResponse(tool_calls=[_tool_call("execute_terminal", {"command": "pwd"}, f"tc{i}")])
+    for i in range(3)
+  ] + [LLMResponse(content="Done.")])
+
+  await ReActAgent().run(session, mock_runner, prompt="Fix it")
+  assert any("repeatedly" in entry.content.lower() for entry in session.memory.entries)
+
+
+# --------------------------------------------------------------------------- #
 # has_more smart exemption
 # --------------------------------------------------------------------------- #
 
 from nonoka.core.tool_response import ToolResponse
 
-@tool
+@tool(execution=ToolExecution(read_only=True, pagination=True))
 async def paginated_search(ctx, query: str) -> ToolResponse:
   """Returns has_more=True to test exemption logic."""
   return ToolResponse(
@@ -219,7 +263,7 @@ async def test_loop_detection_exempts_has_more_true(mock_runner):
   assert len(loop_warnings) == 0, "has_more=True should exempt from loop detection"
 
 
-@tool
+@tool(execution=ToolExecution(read_only=True, pagination=True))
 async def no_more_search(ctx, query: str) -> ToolResponse:
   """Returns has_more=False to test accelerated detection."""
   return ToolResponse(
@@ -267,12 +311,12 @@ async def test_loop_detection_accelerates_when_has_more_false(mock_runner):
 # Short-cycle detection (A→B→A→B)
 # --------------------------------------------------------------------------- #
 
-@tool
+@tool(execution=ToolExecution(read_only=True))
 async def tool_a(ctx, data: str) -> str:
   return f"A: {data}"
 
 
-@tool
+@tool(execution=ToolExecution(read_only=True))
 async def tool_b(ctx, data: str) -> str:
   return f"B: {data}"
 
@@ -313,7 +357,7 @@ async def test_loop_detection_catches_alternating_pattern(mock_runner):
 # Result similarity detection
 # --------------------------------------------------------------------------- #
 
-@tool
+@tool(execution=ToolExecution(read_only=True))
 async def similar_result_tool(ctx, query: str) -> ToolResponse:
   """Returns nearly identical results regardless of query."""
   return ToolResponse(
@@ -361,7 +405,7 @@ async def test_loop_detection_by_result_similarity(mock_runner):
 # Graded response escalation
 # --------------------------------------------------------------------------- #
 
-@tool
+@tool(execution=ToolExecution(read_only=True))
 async def stubborn_tool(ctx, data: str) -> str:
   return "stubborn result"
 
@@ -433,7 +477,7 @@ async def test_loop_detection_termination_on_third_trigger(mock_runner):
 # ToolResponse suggested_next_step propagation
 # --------------------------------------------------------------------------- #
 
-@tool
+@tool(execution=ToolExecution(read_only=True, pagination=True))
 async def guided_tool(ctx, query: str) -> dict:
   return {
     "result": {"answer": 42},

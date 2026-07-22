@@ -5,6 +5,7 @@ import json
 from nonoka import Runner
 from nonoka.core.llm import LLMResponse
 from nonoka.ext.eval.datasets.builtins import load_tool_use
+from nonoka.ext.eval.models import EvalSample
 from nonoka.ext.eval.runners.headless import HeadlessEvalRunner
 
 
@@ -62,3 +63,42 @@ def test_headless_runner_verifies_multistep_tool_sample():
   assert result.metrics.total_tokens == 40
   assert result.tool_trace == ["read_file:incoming.txt", "write_file:cleaned.txt", "execute_python"]
   assert {call["temperature"] for call in provider.calls} == {0.0}
+
+
+def test_verified_repair_uses_extension_feedback_in_one_session():
+  bad_write = {
+    "id": "write-bad",
+    "function": {"name": "write_file", "arguments": json.dumps({
+      "path": "solution.py", "content": "def solve():\n    return 1\n",
+    })},
+  }
+  fixed_write = {
+    "id": "write-fixed",
+    "function": {"name": "write_file", "arguments": json.dumps({
+      "path": "solution.py", "content": "def solve():\n    return 2\n",
+    })},
+  }
+  provider = ScriptedProvider([
+    LLMResponse(tool_calls=[bad_write]),
+    LLMResponse(content="done"),
+    LLMResponse(tool_calls=[fixed_write]),
+    LLMResponse(content="done"),
+  ])
+
+  def factory(hooks):
+    runner = Runner(checkpoint="memory", memory="in_memory", hooks=hooks)
+    runner._create_llm = lambda _agent: provider  # type: ignore[method-assign]
+    return runner
+
+  sample = EvalSample(
+    id="repair", dataset="test", kind="code", prompt="Implement solve.",
+    metadata={"tests": ["assert solve() == 2"], "entry_point": "solve"},
+  )
+  result = __import__("asyncio").run(
+    HeadlessEvalRunner("fake", strategy="verified_repair", max_verifier_iterations=1, runner_factory=factory).evaluate(sample)
+  )
+
+  assert result.success is True, f"{result.verifier_message}\n{result.trace}"
+  assert result.trace is not None
+  assert len(result.trace["verifications"]) == 2
+  assert any(item["name"] == "verifier_repair" for item in result.trace["extensions"])

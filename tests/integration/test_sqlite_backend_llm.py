@@ -8,6 +8,8 @@ from nonoka.core.tool import tool
 from nonoka.backends.checkpoint.sqlite import SQLiteCheckpointStore
 from nonoka.backends.memory.sqlite import SQLiteMemoryBackend
 
+pytestmark = pytest.mark.live
+
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")

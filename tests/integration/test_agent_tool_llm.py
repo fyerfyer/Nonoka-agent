@@ -10,6 +10,8 @@ from nonoka import Agent, Runner, AgentTool, MemoryStrategy
 from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
 
+pytestmark = pytest.mark.live
+
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")

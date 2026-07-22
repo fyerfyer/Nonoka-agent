@@ -4,6 +4,8 @@ import os
 from nonoka import Agent, prompt, PromptTemplate, Runner
 from nonoka.core.tool import tool
 
+pytestmark = pytest.mark.live
+
 
 @pytest.fixture
 def runner():

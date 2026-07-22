@@ -17,6 +17,8 @@ import pytest
 
 from dotenv import load_dotenv
 
+pytestmark = pytest.mark.live
+
 from nonoka import Agent, Runner, ToolResponse, make_tool_response
 from nonoka.core.tool import tool
 from nonoka.core.system_prompts import SystemPromptTemplate

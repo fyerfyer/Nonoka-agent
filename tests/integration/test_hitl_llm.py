@@ -14,6 +14,8 @@ from nonoka.ext.hitl import (
   ToolRule,
 )
 
+pytestmark = pytest.mark.live
+
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")
