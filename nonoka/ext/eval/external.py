@@ -6,6 +6,7 @@ import os
 import shutil
 import subprocess
 import sys
+import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -46,11 +47,20 @@ class ExternalBenchmark:
 
 
 TERMINAL_BENCH = ExternalBenchmark(
-  name="terminal-bench", dataset="terminal-bench-core==0.1.1", executable="tb",
-  description="Real terminal environments with official Docker verifiers.",
+  name="terminal-bench", dataset="terminal-bench@2.0", executable="harbor",
+  description="Terminal-Bench 2 tasks run and verified by Harbor-managed Docker environments.",
   install_hint=(
-    "Install terminal-bench and local nonoka in one dedicated Python >=3.12 environment, "
-    "then set NONOKA_TERMINAL_BENCH_BIN to that environment's tb executable."
+    "Install Harbor and local nonoka in one dedicated Python >=3.12 environment, "
+    "ensure Docker is available, then set NONOKA_HARBOR_BIN to that environment's harbor executable."
+  ),
+  executable_env_var="NONOKA_HARBOR_BIN",
+)
+TERMINAL_BENCH_LEGACY = ExternalBenchmark(
+  name="terminal-bench-legacy", dataset="terminal-bench-core==0.1.1", executable="tb",
+  description="Legacy Terminal-Bench 0.1.1 adapter; results are not comparable to Terminal-Bench 2.",
+  install_hint=(
+    "Install terminal-bench 0.1.1 and set NONOKA_TERMINAL_BENCH_BIN. "
+    "Use only for reproducing historical results."
   ),
   executable_env_var="NONOKA_TERMINAL_BENCH_BIN",
 )
@@ -77,7 +87,7 @@ EVALPLUS_BENCH = ExternalBenchmark(
   ),
   requires_docker=False, python_env_var="NONOKA_EVALPLUS_PYTHON",
 )
-EXTERNAL_BENCHMARKS = (TERMINAL_BENCH, SWE_BENCH, TAU2_BENCH, EVALPLUS_BENCH)
+EXTERNAL_BENCHMARKS = (TERMINAL_BENCH, TERMINAL_BENCH_LEGACY, SWE_BENCH, TAU2_BENCH, EVALPLUS_BENCH)
 
 
 def external_benchmark_status() -> list[dict[str, Any]]:
@@ -96,6 +106,12 @@ def _evaluation_environment() -> dict[str, str]:
   for key, value in dotenv_values(dotenv_path).items():
     if value is not None:
       environment.setdefault(key, value)
+  # Harbor's Supabase/httpx dependency does not accept the ``socks://`` URL
+  # scheme used by some desktop proxy clients. Keep HTTP(S)_PROXY intact and
+  # only remove the incompatible fallback for external benchmark children.
+  for key in ("ALL_PROXY", "all_proxy"):
+    if environment.get(key, "").lower().startswith("socks://"):
+      environment.pop(key, None)
 
   config_path = Path(environment.get("NONOKA_EVAL_CONFIG", Path.home() / ".config" / "nonoka" / "config.yaml"))
   if not config_path.is_file():
@@ -121,27 +137,63 @@ def run_terminal_bench(
   agent: str = "nonoka",
   output: Path | None = None,
   task_ids: list[str] | None = None,
-  test_timeout_seconds: float | None = 300.0,
+  test_timeout_seconds: float | None = None,
+  agent_kwargs: dict[str, Any] | None = None,
 ) -> int:
-  """Delegate Docker lifecycle and scoring to the official ``tb`` harness."""
+  """Run Terminal-Bench 2 through Harbor's official task/verifier lifecycle."""
+  # Harbor owns verifier timeouts.  Keep the argument temporarily so callers
+  # written for the old adapter do not silently change semantics.
+  _ = test_timeout_seconds
   status = TERMINAL_BENCH.status()
   if not status["available"] or not status["docker_ready"]:
     raise RuntimeError("Terminal-Bench unavailable: run `nonoka eval doctor` for remediation.")
   if agent != "nonoka":
     raise ValueError("Only the official Nonoka Terminal-Bench adapter is supported by this command.")
   executable = str(status["configured_executable"] or TERMINAL_BENCH.executable)
-  dataset_path = os.environ.get("NONOKA_TERMINAL_BENCH_DATASET_PATH")
   command = [
-    executable, "run",
+    executable, "run", "--dataset", TERMINAL_BENCH.dataset,
+    "--agent", "nonoka.ext.eval.harbor:NonokaHarborAgent",
+    "--model", model, "--n-concurrent", "1", "--yes",
+  ]
+  if task_ids:
+    for task_id in task_ids:
+      command.extend(["--include-task-name", task_id])
+  elif limit is not None:
+    command.extend(["--n-tasks", str(limit)])
+  for key, value in sorted((agent_kwargs or {}).items()):
+    command.extend(["--agent-kwarg", f"{key}={json.dumps(value, ensure_ascii=False)}"])
+  if output is not None:
+    output.mkdir(parents=True, exist_ok=True)
+    command.extend(["--jobs-dir", str(output)])
+    _write_harbor_launch_manifest(output, command, model, task_ids, limit)
+  return subprocess.run(command, env=_evaluation_environment(), check=False).returncode
+
+
+def run_terminal_bench_legacy(
+  model: str,
+  limit: int | None,
+  agent: str = "nonoka",
+  output: Path | None = None,
+  task_ids: list[str] | None = None,
+  test_timeout_seconds: float | None = 300.0,
+) -> int:
+  """Reproduce historical TB 0.1.1 results without mixing them with TB2."""
+  status = TERMINAL_BENCH_LEGACY.status()
+  if not status["available"] or not status["docker_ready"]:
+    raise RuntimeError("Legacy Terminal-Bench unavailable: run `nonoka eval doctor` for remediation.")
+  if agent != "nonoka":
+    raise ValueError("Only the official Nonoka Terminal-Bench adapter is supported by this command.")
+  command = [
+    str(status["configured_executable"] or TERMINAL_BENCH_LEGACY.executable), "run",
+    "--dataset", TERMINAL_BENCH_LEGACY.dataset,
     "--agent-import-path", "nonoka.ext.eval.terminal_bench:NonokaTerminalBenchAgent",
     "--model", model, "--n-concurrent", "1",
   ]
+  dataset_path = os.environ.get("NONOKA_TERMINAL_BENCH_DATASET_PATH")
   if dataset_path:
     if not Path(dataset_path).is_dir():
       raise RuntimeError("NONOKA_TERMINAL_BENCH_DATASET_PATH must point to an existing task directory.")
-    command[2:2] = ["--dataset-path", dataset_path]
-  else:
-    command[2:2] = ["--dataset", TERMINAL_BENCH.dataset]
+    command[2:4] = ["--dataset-path", dataset_path]
   if task_ids:
     for task_id in task_ids:
       command.extend(["--task-id", task_id])
@@ -153,6 +205,25 @@ def run_terminal_bench(
   if test_timeout_seconds is not None:
     command.extend(["--global-test-timeout-sec", str(test_timeout_seconds)])
   return subprocess.run(command, env=_evaluation_environment(), check=False).returncode
+
+
+def _write_harbor_launch_manifest(
+  output: Path, command: list[str], model: str, task_ids: list[str] | None, limit: int | None,
+) -> None:
+  """Keep a local pointer to a Harbor run without inventing a Harbor output flag."""
+  payload = {
+    "schema_version": 1,
+    "benchmark": TERMINAL_BENCH.dataset,
+    "agent": "nonoka.ext.eval.harbor:NonokaHarborAgent",
+    "model": model,
+    "requested_task_names": task_ids or [],
+    "requested_limit": limit if not task_ids else None,
+    "command": command,
+    "artifact_note": "Harbor owns the authoritative job artifact and official verifier output.",
+  }
+  (output / "harbor-launch.json").write_text(
+    json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8",
+  )
 
 
 def run_tau2_bench(

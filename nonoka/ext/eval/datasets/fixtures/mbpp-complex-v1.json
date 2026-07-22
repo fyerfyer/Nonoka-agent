@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "source": "google-research-datasets/mbpp sanitized",
+  "source_sha256": "ca95deaa9a01ef0a6f439f88bcf0dd3db3563d22f22aad6cae04ebb9a8d8c8e9",
+  "selection": "test_count desc, test_characters desc, prompt_characters desc, task_id asc; retain first 20",
+  "task_ids": [
+    "mbpp/799",
+    "mbpp/6",
+    "mbpp/756",
+    "mbpp/803",
+    "mbpp/172",
+    "mbpp/735",
+    "mbpp/802",
+    "mbpp/759",
+    "mbpp/758",
+    "mbpp/730",
+    "mbpp/725",
+    "mbpp/754",
+    "mbpp/773",
+    "mbpp/723",
+    "mbpp/766",
+    "mbpp/800",
+    "mbpp/721",
+    "mbpp/791",
+    "mbpp/726",
+    "mbpp/223"
+  ]
+}

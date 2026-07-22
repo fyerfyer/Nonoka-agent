@@ -40,9 +40,9 @@ def test_tau2_runner_uses_isolated_interpreter_and_keeps_credentials_out_of_argv
 
 
 def test_terminal_bench_task_ids_take_precedence_over_limit(monkeypatch, tmp_path):
-  executable = tmp_path / "tb"
+  executable = tmp_path / "harbor"
   executable.touch()
-  monkeypatch.setenv("NONOKA_TERMINAL_BENCH_BIN", str(executable))
+  monkeypatch.setenv("NONOKA_HARBOR_BIN", str(executable))
   commands: list[list[str]] = []
 
   class Completed:
@@ -55,14 +55,14 @@ def test_terminal_bench_task_ids_take_precedence_over_limit(monkeypatch, tmp_pat
   monkeypatch.setattr(external.shutil, "which", lambda command: "/usr/bin/docker" if command == "docker" else None)
   monkeypatch.setattr(external.subprocess, "run", fake_run)
 
-  external.run_terminal_bench("deepseek-chat", 10, task_ids=["fix-git", "tmux-advanced-workflow"])
+  external.run_terminal_bench("deepseek-chat", 10, task_ids=["sanitize-git-repo", "configure-git-webserver"])
 
   command = commands[-1]
   assert "--n-tasks" not in command
-  assert command.count("--task-id") == 2
+  assert command.count("--include-task-name") == 2
 
 
-def test_terminal_bench_allows_pinned_local_dataset_path(monkeypatch, tmp_path):
+def test_terminal_bench_legacy_allows_pinned_local_dataset_path(monkeypatch, tmp_path):
   executable = tmp_path / "tb"
   executable.touch()
   dataset = tmp_path / "tasks"
@@ -81,7 +81,7 @@ def test_terminal_bench_allows_pinned_local_dataset_path(monkeypatch, tmp_path):
   monkeypatch.setattr(external.shutil, "which", lambda command: "/usr/bin/docker" if command == "docker" else None)
   monkeypatch.setattr(external.subprocess, "run", fake_run)
 
-  external.run_terminal_bench("deepseek-chat", 1)
+  external.run_terminal_bench_legacy("deepseek-chat", 1)
 
   command = commands[-1]
   assert ["--dataset-path", str(dataset)] == command[2:4]
@@ -101,10 +101,10 @@ def test_tau2_status_does_not_require_docker(monkeypatch, tmp_path):
   assert status["requires_docker"] is False
 
 
-def test_terminal_bench_uses_official_tb_custom_agent(monkeypatch, tmp_path):
-  executable = tmp_path / "tb"
+def test_terminal_bench_uses_harbor_tb2_adapter(monkeypatch, tmp_path):
+  executable = tmp_path / "harbor"
   executable.touch()
-  monkeypatch.setenv("NONOKA_TERMINAL_BENCH_BIN", str(executable))
+  monkeypatch.setenv("NONOKA_HARBOR_BIN", str(executable))
   captured: dict[str, object] = {}
 
   class Completed:
@@ -123,14 +123,35 @@ def test_terminal_bench_uses_official_tb_custom_agent(monkeypatch, tmp_path):
   assert external.run_terminal_bench("deepseek-chat", 2, output=output) == 0
 
   command = captured["command"]
-  assert command[:5] == [str(executable), "run", "--dataset", "terminal-bench-core==0.1.1", "--agent-import-path"]
-  assert "nonoka.ext.eval.terminal_bench:NonokaTerminalBenchAgent" in command
+  assert command[:5] == [str(executable), "run", "--dataset", "terminal-bench@2.0", "--agent"]
+  assert "nonoka.ext.eval.harbor:NonokaHarborAgent" in command
   assert ["--model", "deepseek-chat"] == command[command.index("--model"):command.index("--model") + 2]
   assert ["--n-tasks", "2"] == command[command.index("--n-tasks"):command.index("--n-tasks") + 2]
-  assert ["--output-path", str(output)] == command[command.index("--output-path"):command.index("--output-path") + 2]
+  assert ["--jobs-dir", str(output)] == command[command.index("--jobs-dir"):command.index("--jobs-dir") + 2]
+  assert "--yes" in command
   assert output.is_dir()
+  manifest = (output / "harbor-launch.json").read_text(encoding="utf-8")
+  assert "terminal-bench@2.0" in manifest
+  assert "--output-path" not in command
   assert "DEEPSEEK_API_KEY" not in " ".join(command)
-  assert ["--global-test-timeout-sec", "300.0"] == command[-2:]
+  assert "--global-test-timeout-sec" not in command
+
+
+def test_terminal_bench_forwards_json_agent_kwargs(monkeypatch, tmp_path):
+  executable = tmp_path / "harbor"
+  executable.touch()
+  monkeypatch.setenv("NONOKA_HARBOR_BIN", str(executable))
+  commands: list[list[str]] = []
+
+  monkeypatch.setattr(external.shutil, "which", lambda command: "/usr/bin/docker" if command == "docker" else None)
+  monkeypatch.setattr(external.subprocess, "run", lambda command, **_kwargs: commands.append(command) or SimpleNamespace(returncode=0))
+
+  external.run_terminal_bench("test", 1, agent_kwargs={"max_turns": 6, "requires_workspace_mutation": True})
+
+  command = commands[-1]
+  assert ["--agent-kwarg", "max_turns=6"] == command[command.index("--agent-kwarg"):command.index("--agent-kwarg") + 2]
+  second = command.index("--agent-kwarg", command.index("--agent-kwarg") + 1)
+  assert command[second:second + 2] == ["--agent-kwarg", "requires_workspace_mutation=true"]
 
 
 def test_external_runner_reads_config_into_child_environment(monkeypatch, tmp_path):
@@ -144,6 +165,16 @@ def test_external_runner_reads_config_into_child_environment(monkeypatch, tmp_pa
 
   assert environment["OPENAI_API_KEY"] == "test-key"
   assert environment["OPENAI_BASE_URL"] == "https://example.invalid/v1"
+
+
+def test_external_runner_removes_only_incompatible_socks_all_proxy(monkeypatch):
+  monkeypatch.setenv("ALL_PROXY", "socks://127.0.0.1:7890")
+  monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+
+  environment = external._evaluation_environment()
+
+  assert "ALL_PROXY" not in environment
+  assert environment["HTTPS_PROXY"] == "http://127.0.0.1:7890"
 
 
 def test_evalplus_keeps_scored_result_when_verifier_returns_nonzero(monkeypatch, tmp_path):

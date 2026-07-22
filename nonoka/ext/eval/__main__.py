@@ -12,9 +12,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from nonoka.ext.eval.datasets import get_registry
-from nonoka.ext.eval.external import external_benchmark_status, run_tau2_bench, run_terminal_bench
+from nonoka.ext.eval.external import (
+  external_benchmark_status,
+  run_tau2_bench,
+  run_terminal_bench,
+  run_terminal_bench_legacy,
+)
 from nonoka.ext.eval.models import EvalRun, Leaderboard
 from nonoka.ext.eval.matrix import build_manifest, run_manifest, write_manifest
+from nonoka.ext.eval.comparison import compare_strategies
 
 
 def _eval_dir() -> Path:
@@ -95,6 +101,34 @@ def cmd_run(args: argparse.Namespace) -> int:
   return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+  if not args.model:
+    print("Error: --model is required.", file=sys.stderr)
+    return 2
+  try:
+    samples = get_registry().load(args.dataset, args.limit, args.offset)
+    if not samples:
+      raise RuntimeError("Dataset is empty")
+    comparison = asyncio.run(compare_strategies(
+      samples, model=args.model, strategies=tuple(args.strategies), trials=args.trials,
+      max_turns=args.max_turns, timeout_seconds=args.timeout, temperature=args.temperature,
+    ))
+  except Exception as exc:
+    print(f"Error: {exc}", file=sys.stderr)
+    return 1
+  output = Path(args.output) if args.output else _eval_dir() / "comparisons" / f"{comparison.comparison_id}.json"
+  comparison.write(output)
+  summary = comparison.summary()
+  print(f"Comparison {summary['comparison_id']} completed: {summary['sample_count']} samples × {summary['trials']} trials")
+  for strategy, data in summary["strategies"].items():
+    print(
+      f"  {strategy}: mean pass@1 {data['mean_pass_at_1']:.2%} "
+      f"variance {data['pass_rate_variance']:.6f} token/success {data['tokens_per_success']}"
+    )
+  print(f"Results written to {output}")
+  return 0
+
+
 def cmd_leaderboard(args: argparse.Namespace) -> int:
   entries = Leaderboard.load(_eval_dir() / "leaderboard.json").entries
   entries = [entry for entry in entries if (not args.dataset or entry["dataset"] == args.dataset) and (not args.model or entry["model"] == args.model)]
@@ -128,6 +162,12 @@ def cmd_external_run(args: argparse.Namespace) -> int:
       output = Path(args.output) if args.output else _eval_dir() / "external" / "terminal-bench"
       return run_terminal_bench(
         args.model, args.limit, args.agent, output, args.task_ids, args.test_timeout,
+        _parse_agent_kwargs(args.agent_kwarg),
+      )
+    if args.benchmark == "terminal-bench-legacy":
+      output = Path(args.output) if args.output else _eval_dir() / "external" / "terminal-bench-legacy"
+      return run_terminal_bench_legacy(
+        args.model, args.limit, args.agent, output, args.task_ids, args.test_timeout,
       )
     if args.benchmark == "tau2-bench":
       output = Path(args.output) if args.output else _eval_dir() / "external" / "tau2-bench"
@@ -147,6 +187,21 @@ def cmd_matrix_plan(args: argparse.Namespace) -> int:
   for job in manifest["jobs"]:
     print(f"  {job['id']:<20} {job['runner']}")
   return 0
+
+
+def _parse_agent_kwargs(values: list[str] | None) -> dict[str, object]:
+  parsed: dict[str, object] = {}
+  for value in values or []:
+    if "=" not in value:
+      raise ValueError("--agent-kwarg must use key=value")
+    key, raw = value.split("=", 1)
+    if not key:
+      raise ValueError("--agent-kwarg key must not be empty")
+    try:
+      parsed[key] = json.loads(raw)
+    except json.JSONDecodeError:
+      parsed[key] = raw
+  return parsed
 
 
 def cmd_matrix_run(args: argparse.Namespace) -> int:
@@ -177,14 +232,26 @@ def _build_parser() -> argparse.ArgumentParser:
   run_parser.add_argument("--timeout", type=float, default=90.0)
   run_parser.add_argument("--temperature", type=float, default=0.0)
   run_parser.add_argument(
-    "--strategy", choices=["direct", "tool_assisted", "verified_repair"],
-    default="tool_assisted", help="Explicit execution strategy for the agent arm.",
+    "--strategy", choices=["auto", "direct", "tool_assisted", "verified_repair"],
+    default="auto", help="Explicit execution strategy; auto uses direct for standalone code.",
   )
   run_parser.add_argument("--no-baseline", dest="baseline", action="store_false", help="Skip direct paired baseline")
   run_parser.set_defaults(baseline=True)
   run_parser.add_argument("--output")
   run_parser.add_argument("--json", action="store_true")
   run_parser.set_defaults(func=cmd_run)
+  compare_parser = subparsers.add_parser("compare", help="Run repeated paired strategy experiments")
+  compare_parser.add_argument("--dataset", "-d", required=True)
+  compare_parser.add_argument("--model", required=True)
+  compare_parser.add_argument("--limit", "-n", type=int, default=None)
+  compare_parser.add_argument("--offset", type=int, default=0)
+  compare_parser.add_argument("--strategies", nargs="+", default=["direct", "tool_assisted", "verified_repair"])
+  compare_parser.add_argument("--trials", type=int, default=3)
+  compare_parser.add_argument("--max-turns", type=int, default=8)
+  compare_parser.add_argument("--timeout", type=float, default=90.0)
+  compare_parser.add_argument("--temperature", type=float, default=0.0)
+  compare_parser.add_argument("--output")
+  compare_parser.set_defaults(func=cmd_compare)
   board_parser = subparsers.add_parser("leaderboard", help="Show local leaderboard")
   board_parser.add_argument("--dataset")
   board_parser.add_argument("--model")
@@ -195,12 +262,19 @@ def _build_parser() -> argparse.ArgumentParser:
   external_parser = subparsers.add_parser("external", help="Run external official benchmark harnesses")
   external_subparsers = external_parser.add_subparsers(dest="external_command", required=True)
   external_run = external_subparsers.add_parser("run")
-  external_run.add_argument("--benchmark", required=True, choices=["terminal-bench", "tau2-bench", "swe-bench"])
+  external_run.add_argument(
+    "--benchmark", required=True,
+    choices=["terminal-bench", "terminal-bench-legacy", "tau2-bench", "swe-bench"],
+  )
   external_run.add_argument("--model", required=True)
   external_run.add_argument("--limit", type=int, default=10)
-  external_run.add_argument("--task-id", dest="task_ids", action="append", help="Terminal-Bench task id; repeat to select multiple tasks.")
-  external_run.add_argument("--test-timeout", type=float, default=300.0, help="Official Terminal-Bench verifier timeout in seconds.")
+  external_run.add_argument("--task-id", dest="task_ids", action="append", help="Terminal-Bench task name; repeat to select multiple tasks.")
+  external_run.add_argument("--test-timeout", type=float, default=300.0, help="Legacy Terminal-Bench verifier timeout in seconds.")
   external_run.add_argument("--agent", default=os.environ.get("NONOKA_HARBOR_AGENT", "nonoka"))
+  external_run.add_argument(
+    "--agent-kwarg", action="append", default=[],
+    help="Harbor agent key=value option; values accept JSON (for example max_turns=8).",
+  )
   external_run.add_argument("--domain", default="retail", choices=["retail", "airline", "telecom", "telecom-workflow", "banking_knowledge"])
   external_run.add_argument("--max-steps", type=int, default=24)
   external_run.add_argument("--timeout", type=int, default=300)

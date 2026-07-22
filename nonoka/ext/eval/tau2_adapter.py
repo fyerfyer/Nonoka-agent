@@ -14,6 +14,8 @@ import subprocess
 import uuid
 from typing import Any
 
+from nonoka.ext.eval.tau2_grounding import validate_final_response
+
 
 class _NonokaBridgeClient:
   """Persistent NDJSON client for the isolated Nonoka runtime."""
@@ -95,6 +97,11 @@ def _configure_official_evaluator() -> None:
 def _tau_message_to_nonoka(message: Any) -> dict[str, Any]:
   from tau2.data_model.message import AssistantMessage, SystemMessage, ToolMessage, UserMessage
 
+  if isinstance(message, dict):
+    return {
+      key: value for key, value in message.items()
+      if key in {"role", "content", "tool_calls", "tool_call_id"}
+    }
   if isinstance(message, (SystemMessage, UserMessage)):
     return {"role": message.role, "content": message.content}
   if isinstance(message, AssistantMessage):
@@ -176,6 +183,7 @@ def _register_components() -> None:
 
   class State(BaseModel):
     messages: list[Any]
+    grounding_events: list[dict[str, Any]] = []
 
   class NonokaTauAgent(HalfDuplexAgent[State]):
     def __init__(self, tools, domain_policy, llm: str, **_kwargs):
@@ -199,6 +207,9 @@ def _register_components() -> None:
       else:
         state.messages.append(message)
       response = _ask_nonoka(self.llm, state.messages, self.tools)
+      response = _ground_final_response(
+        self.llm, state.messages, self.tools, self.domain_policy, response, state.grounding_events,
+      )
       tool_calls = _to_tau_tool_calls(response.get("tool_calls"))
       assistant = AssistantMessage.text(
         "" if tool_calls else str(response.get("content") or "I need more information."),
@@ -251,6 +262,45 @@ def _register_components() -> None:
 
   registry.register_agent_factory(create_nonoka_tau_agent, "nonoka_tau")
   registry.register_user(NonokaTauUser, "nonoka_tau_user")
+
+
+def _ground_final_response(
+  model: str,
+  messages: list[Any],
+  tools: list[Any],
+  policy: str,
+  response: dict[str, Any],
+  events: list[dict[str, Any]],
+) -> dict[str, Any]:
+  """Apply one evidence-only revision to a textual τ³ agent response."""
+  if response.get("tool_calls"):
+    return response
+  content = str(response.get("content") or "")
+  finding = validate_final_response(messages, content, policy)
+  events.append({"phase": "initial", **finding.to_dict()})
+  if finding.passed:
+    response["nonoka_grounding"] = events[-1]
+    return response
+
+  # The revision is a second model completion but remains in the same τ³
+  # participant turn.  It is deliberately text-only so the official harness
+  # retains ownership of any further tool invocation.
+  revision_prompt = {
+    "role": "system",
+    "content": f"[Grounding feedback]\n{finding.feedback}",
+  }
+  revised = _ask_nonoka(model, [*messages, revision_prompt], tools)
+  if revised.get("tool_calls"):
+    events.append({"phase": "revision", "passed": True, "reason": "returned_tool_calls"})
+    revised["nonoka_grounding"] = events[-1]
+    return revised
+  revised_finding = validate_final_response(messages, str(revised.get("content") or ""), policy)
+  events.append({"phase": "revision", **revised_finding.to_dict()})
+  if not revised_finding.passed:
+    # Do not repeat an unsupported factual claim after the bounded revision.
+    revised["content"] = "I need to verify the current account details before I can confirm that information."
+  revised["nonoka_grounding"] = events[-1]
+  return revised
 
 
 def main() -> int:

@@ -16,6 +16,20 @@ def test_code_checker_runs_functional_harness(tmp_path):
   assert CodeChecker().check(sample, tmp_path) == (True, "functional tests passed")
 
 
+def test_code_checker_reports_missing_function_as_structured_diagnostic(tmp_path):
+  sample = EvalSample(
+    id="code/missing", dataset="test", prompt="", kind="code",
+    metadata={"tests": ["assert add(1, 2) == 3"]},
+  )
+  (tmp_path / "solution.py").write_text("def subtract(a, b):\n  return a - b\n")
+
+  report = CodeChecker().check_detailed(sample, tmp_path)
+
+  assert report.passed is False
+  assert report.diagnostic is not None
+  assert report.diagnostic.code.value == "missing_function"
+
+
 def test_tool_use_checker_requires_trace_and_exact_workspace(tmp_path):
   sample = load_tool_use(1)[0]
   for name, content in sample.metadata["expected"].items():

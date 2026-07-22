@@ -111,3 +111,41 @@ class Leaderboard(BaseModel):
   def save(self, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+
+
+class StrategyComparison(BaseModel):
+  """Repeated, paired strategy experiment over one fixed sample set."""
+
+  comparison_id: str = Field(default_factory=lambda: uuid4().hex[:12])
+  timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+  dataset: str
+  model: str
+  sample_ids: list[str]
+  trials: int
+  runs: list[EvalRun] = Field(default_factory=list)
+  metadata: dict[str, Any] = Field(default_factory=dict)
+
+  def summary(self) -> dict[str, Any]:
+    by_strategy: dict[str, list[EvalRun]] = {}
+    for run in self.runs:
+      by_strategy.setdefault(str(run.metadata.get("strategy", "unknown")), []).append(run)
+    strategies: dict[str, Any] = {}
+    for strategy, runs in by_strategy.items():
+      rates = [run.summary()["pass_at_1"] for run in runs]
+      tokens = sum(sum(result.metrics.total_tokens for result in run.samples) for run in runs)
+      successes = sum(sum(result.success for result in run.samples) for run in runs)
+      mean = sum(rates) / len(rates) if rates else 0.0
+      variance = sum((rate - mean) ** 2 for rate in rates) / len(rates) if rates else 0.0
+      strategies[strategy] = {
+        "trials": len(runs), "mean_pass_at_1": mean, "pass_rate_variance": variance,
+        "total_tokens": tokens, "successes": successes,
+        "tokens_per_success": tokens / successes if successes else None,
+      }
+    return {
+      "comparison_id": self.comparison_id, "dataset": self.dataset, "model": self.model,
+      "sample_count": len(self.sample_ids), "trials": self.trials, "strategies": strategies,
+    }
+
+  def write(self, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(self.model_dump_json(indent=2), encoding="utf-8")

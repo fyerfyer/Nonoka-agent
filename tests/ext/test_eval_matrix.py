@@ -12,11 +12,13 @@ def test_default_matrix_is_full_and_pins_generation_policy():
 
   assert manifest["schema_version"] == SCHEMA_VERSION
   assert manifest["policy"]["temperature"] == 0.0
+  assert "deterministic" in manifest["gates"]
   assert {job["id"] for job in manifest["jobs"]} == {
     "humaneval", "mbpp-sanitized", "evalplus-humaneval", "evalplus-mbpp",
     "tau3-retail", "tau3-airline", "terminal-bench",
   }
   assert next(job for job in manifest["jobs"] if job["id"] == "humaneval")["limit"] is None
+  assert "Harbor" in next(job for job in manifest["jobs"] if job["id"] == "terminal-bench")["note"]
 
 
 def test_framework_matrix_honors_limit_and_offset():

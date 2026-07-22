@@ -186,9 +186,15 @@ result = await Runner().run_react(agent, "Implement and verify the fix", deps=No
 `VerifierRepairExtension` requests another normal ReAct turn only after a
 deterministic verifier fails. `ResponseGroundingExtension` can similarly
 validate a final natural-language claim against tool-established state. Use
-`CodeStrategyRouter` to choose `direct`, `tool_assisted`, or
-`verified_repair` from caller-known task capabilities rather than enabling an
-expensive tool loop for every code-generation prompt.
+`CodingWorkflow` (or `CodeStrategyRouter`) to choose `direct`,
+`tool_assisted`, or `verified_repair` from caller-known task capabilities.
+The default is deliberately conservative: standalone code is direct, a
+workspace task is tool-assisted, and repair requires a workspace plus a
+deterministic evaluator. `TerminalCodingWorkflow` additionally requires the
+caller to provide an explicit `verify_command`; it never guesses a test
+command from the prompt. `TerminalCommandEvaluator` can wrap that approved
+command and a caller-owned terminal executor to return structured test
+failures for the bounded repair extension.
 
 ## Gateway (IM Platform Integration)
 
@@ -388,7 +394,7 @@ async def main():
 Some hosts (e.g. OpenCode) want to own tool execution and human-in-the-loop approval themselves. nonoka-agent supports this via `ExternalCapability`: the framework registers the tool schema and emits the tool call, but execution is delegated to the host. When the host returns a result, the session resumes with `Runner.resume_external_tools()`.
 
 ```python
-from nonoka import AgentBuilder, Runner, ExternalCapability
+from nonoka import AgentBuilder, Runner, ExternalCapability, ToolExecution
 
 cap = ExternalCapability(
     name="bash",
@@ -398,6 +404,7 @@ cap = ExternalCapability(
         "properties": {"command": {"type": "string"}},
         "required": ["command"],
     },
+    execution=ToolExecution(stateful_action=True, mutates_workspace=True),
 )
 
 agent = AgentBuilder().model("gpt-4o").tool(cap).build()
@@ -406,17 +413,99 @@ runner = Runner()
 # In the caller (e.g. nonoka-cli bridge):
 # 1. Run until ExternalToolExecutionRequiredError is raised.
 # 2. Forward the tool call to the external host.
-# 3. Resume with the host's result.
+# 3. Resume with the host's result. Workspace-mutating tools include a host
+#    receipt and before/after workspace attestation.
 async for event in runner.resume_external_tools(
     agent,
     deps=None,
     session_id="session-123",
-    results={"call_abc": "Hello, world!"},
+    results={"call_abc": {
+        "result": "command completed",
+        "exit_code": 0,
+        "elapsed_seconds": 0.14,
+        "host": "my-terminal-host",
+        "workspace": {
+            "root": "/workspace",
+            "before_digest": "...",
+            "after_digest": "...",
+            "created": ["solution.py"],
+        },
+    }},
 ):
     print(event)
 ```
 
-`ExternalCapability` carries `external=True` so the ReAct loop pauses instead of invoking the tool locally. This lets nonoka focus on decision-making while the host owns execution, permissions, and TUI rendering.
+`ExternalCapability` carries `external=True` so the ReAct loop pauses instead of invoking the tool locally. This lets nonoka focus on decision-making while the host owns execution, permissions, and TUI rendering. A capability declared with `ToolExecution(mutates_workspace=True)` rejects a resume without this receipt; the receipt is recorded in the redacted trace. It makes the cross-process trust boundary auditable, but does not turn an untrusted host into a sandbox.
+
+### Evaluation policy and external benchmarks
+
+Framework code tasks default to direct generation. For a reproducible paired
+comparison of the three explicit strategies, use the versioned complex MBPP
+slice:
+
+```bash
+python -m nonoka.ext.eval compare --dataset mbpp-complex-v1 --model <model> --trials 3
+```
+
+Terminal-Bench 2 uses Harbor as the main official runner. Harbor owns the
+Docker lifecycle and authoritative job artifact, while Nonoka exports its
+trace as ATIF:
+
+```bash
+python -m nonoka.ext.eval external run --benchmark terminal-bench \
+  --model <model> --task-id sanitize-git-repo --task-id configure-git-webserver
+```
+
+For a task whose contract explicitly requires a workspace edit, opt into the
+terminal progress reminder rather than enabling it globally. Terminal output is
+also bounded before it enters the model context; both controls are adjustable
+through Harbor agent kwargs:
+
+```bash
+python -m nonoka.ext.eval external run --benchmark terminal-bench --model <model> \
+  --task-id sanitize-git-repo --agent-kwarg requires_workspace_mutation=true \
+  --agent-kwarg max_exploration_turns=3 --agent-kwarg max_terminal_output_chars=12000
+```
+
+The exported ATIF trajectory preserves per-turn tool attribution, bounded
+terminal observations, usage, extension decisions, and termination metadata.
+
+Set `NONOKA_HARBOR_BIN` to the dedicated Harbor environment's executable and
+run `python -m nonoka.ext.eval doctor` before starting a live benchmark. The
+evaluation gate is deliberately two-stage: first run deterministic core/eval
+adapter tests, then run isolated official harnesses only after the doctor
+check reports their dependencies ready.
+`terminal-bench-legacy` remains only for historical 0.1.1 reproduction; do
+not compare its scores with Terminal-Bench 2. τ³ final text is checked against
+deterministic tool evidence before it is emitted, and EvalPlus remains the
+official scorer for HumanEval+/MBPP+.
+
+### Validation snapshot
+
+The following results are retained as an engineering validation record, not a
+single leaderboard number: the suites measure different capabilities, and the
+model, budget, and verifier remain part of every claim. Scores below are from
+the remediation evaluation cycle completed on 2026-07-22.
+
+| Scope | Result | What it establishes |
+| --- | --- | --- |
+| Deterministic core and eval-adapter regressions | **73 passed** in 3.20 s; subsequent targeted protocol regression **48 passed** | Safe serialization, progress-aware loop detection, redacted trace/usage, external workspace receipts, Harbor/ATIF mapping, and evaluator adapters remain covered without a live model. |
+| Terminal-Bench 2 / Harbor | Official `sanitize-git-repo` harness completed in repeated trials with trace and token attribution; rewards **0.0** | The adapter, Docker lifecycle, official verifier, and artifacts work end-to-end. One run exposed and then validated a fix for context trimming that could orphan tool responses; the remaining failures were model task-policy failures (exploration, missed files, or non-exact replacements), not harness failures. |
+| Historical Terminal-Bench 0.1.1 | `tmux-advanced-workflow` passed its official verifier | Pager handling, multiline tmux submission, loop handling, and usage aggregation work on the legacy adapter. `fix-git` still missed byte-exact Markdown content generated by the model; it is not counted as an adapter success. |
+| τ³ retail | **9/10** tasks passed | Multi-turn, mixed-tool workflows execute under the conservative stateful-tool policy. The remaining failure was an unsupported SKU-count claim in the model's final response. |
+| EvalPlus HumanEval+ | base **160/164** (97.56%); plus **150/164** (91.46%) | Official complete-set code-generation scores. |
+| EvalPlus MBPP+ | base **369/378** (97.62%); plus **311/378** (82.28%) | Official complete-set code-generation scores. |
+| Fixed 20-task complex MBPP slice | direct **12/20**; tool-assisted **11/20**; verified repair **12/20** | The bounded repair workflow restores parity when a deterministic verifier is available, but tool use does not justify replacing direct generation as the default for standalone code. |
+
+The Terminal-Bench 2 controlled retry with a six-turn cap reduced the same
+task's trajectory to 7,169 input and 574 output tokens (versus 110,089 and
+1,824 in the initial uncapped run) and reached the target secret file before
+the cap. Later normal-budget trials confirmed stable execution and complete
+Harbor artifacts, but did not pass the task: a 24-turn run used exact requested
+placeholders but excluded a discovered JSON file; a 32-turn profile still
+searched without editing. These are useful evidence for improving terminal
+task policy, not a claim of benchmark quality. Fair strategy comparisons need
+the same normal turn budget and multiple trials.
 
 ### From Dict / YAML / JSON
 

@@ -42,6 +42,14 @@ def build_manifest(model: str, temperature: float, max_turns: int, timeout: floa
       "timeout_seconds": timeout,
       "trials": 1,
     },
+    "gates": {
+      "deterministic": (
+        "Run core and eval adapter regression tests before spending model or Docker resources."
+      ),
+      "external": (
+        "Run `nonoka eval doctor`; only then launch isolated official benchmark harnesses."
+      ),
+    },
     "jobs": [
       {
         "id": "humaneval", "runner": "framework", "dataset": "humaneval",
@@ -72,6 +80,7 @@ def build_manifest(model: str, temperature: float, max_turns: int, timeout: floa
       {
         "id": "terminal-bench", "runner": "official-external", "benchmark": "terminal-bench",
         "limit": None,
+        "note": "Terminal-Bench 2 through Harbor; do not compare with legacy terminal-bench-core 0.1.1 scores.",
       },
     ],
   }
@@ -103,7 +112,7 @@ async def run_manifest(
         runner = HeadlessEvalRunner(
           policy["model"], max_turns=policy["max_turns"],
           timeout_seconds=policy["timeout_seconds"], temperature=policy["temperature"],
-          strategy=job.get("strategy", "tool_assisted"),
+          strategy=job.get("strategy", "auto"),
           max_verifier_iterations=int(job.get("max_verifier_iterations", 2)),
         )
         results = await runner.evaluate_many(samples)

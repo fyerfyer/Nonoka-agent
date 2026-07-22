@@ -286,6 +286,7 @@ class ReActAgent:
             await session.memory.add(
               obs_text,
               MemoryRole.TOOL,
+              defer_budget=True,
               tool_call_id=tc_id,
               tool_name=func_name,
             )
@@ -303,6 +304,7 @@ class ReActAgent:
                 )
 
         if session.memory is not None:
+          await session.memory.enforce_budget()
           for notice in has_more_notices + tool_guidance:
             await session.memory.add(notice, MemoryRole.SYSTEM)
 
@@ -434,6 +436,7 @@ class ReActAgent:
         await session.memory.add(
           json.dumps(result, ensure_ascii=False, default=str),
           MemoryRole.TOOL,
+          defer_budget=True,
           tool_call_id=tc_id,
           tool_name=tc.get("function", {}).get("name", ""),
         )
@@ -453,10 +456,12 @@ class ReActAgent:
       await session.memory.add(
         json.dumps(result, ensure_ascii=False, default=str) if not isinstance(result, str) else result,
         MemoryRole.TOOL,
+        defer_budget=True,
         tool_call_id=tc_id,
         tool_name=tc.get("function", {}).get("name", ""),
       )
 
+    await session.memory.enforce_budget()
     session.status = SessionStatus.RUNNING
     session.end_time = None
     await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -533,8 +538,23 @@ class ReActAgent:
       if tc_id in existing_tool_ids:
         continue
 
-      result = results.get(tc_id)
-      if result is None:
+      from nonoka.core.external_tool import ExternalToolReceipt
+
+      raw_result = results.get(tc_id)
+      capability = self._capability_for_call(session, tc)
+      receipt = ExternalToolReceipt.from_value(raw_result) if raw_result is not None else None
+      requires_attestation = bool(getattr(capability, "requires_workspace_attestation", False))
+      if requires_attestation and (receipt is None or receipt.workspace is None):
+        raise ValueError(
+          f"External tool '{tc_name}' declared workspace mutation but returned no workspace attestation."
+        )
+
+      if receipt is not None:
+        session.trace.record_external_receipt(
+          str(tc_id), receipt, verified=receipt.workspace is not None,
+        )
+      result = receipt.result if receipt is not None else None
+      if raw_result is None:
         obs_text = json.dumps(
           {"error": f"No result returned by external host for tool '{tc_name}'", "tool_call_id": tc_id},
           ensure_ascii=False,
@@ -548,10 +568,12 @@ class ReActAgent:
       await session.memory.add(
         obs_text,
         MemoryRole.TOOL,
+        defer_budget=True,
         tool_call_id=tc_id,
         tool_name=tc_name,
       )
 
+    await session.memory.enforce_budget()
     session.status = SessionStatus.RUNNING
     session.end_time = None
     await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -887,6 +909,7 @@ class ReActAgent:
               await session.memory.add(
                 obs_text,
                 MemoryRole.TOOL,
+                defer_budget=True,
                 tool_call_id=tc_id,
                 tool_name=tc_name,
               )
@@ -910,9 +933,13 @@ class ReActAgent:
             await session.memory.add(
               obs_text,
               MemoryRole.TOOL,
+              defer_budget=True,
               tool_call_id=tc_id,
               tool_name=tc_name,
             )
+
+        if session.memory is not None:
+          await session.memory.enforce_budget()
 
         # Inject ToolResponse metadata SYSTEM messages *after* all TOOL
         # entries so that ASSISTANT+tool_calls stay contiguous with their
@@ -1803,10 +1830,12 @@ class EvaluationResult:
     passed: bool,
     feedback: str = "",
     score: float | None = None,
+    details: dict[str, Any] | None = None,
   ):
     self.passed = passed
     self.feedback = feedback
     self.score = score
+    self.details = details or {}
 
 
 # --------------------------------------------------------------------------- #

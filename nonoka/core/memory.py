@@ -66,6 +66,64 @@ def _default_count_tokens(content: str) -> int:
     return max(1, len(content.encode("utf-8")) // 3)
 
 
+def _pop_protocol_unit(entries: list[MemoryEntry], start: int = 0) -> list[MemoryEntry]:
+  """Remove one chat exchange without orphaning tool results.
+
+  ``entries`` excludes system messages and preserves conversational order.
+  A tool result can only be sent to a provider after the assistant message
+  that declared its ID, so an assistant tool-call message and its contiguous
+  results must be trimmed together.
+  """
+  first = entries.pop(start)
+  removed = [first]
+  if first.role != MemoryRole.ASSISTANT:
+    return removed
+
+  raw_calls = first.metadata.get("tool_calls")
+  if not isinstance(raw_calls, list):
+    return removed
+  call_ids = {
+    str(call.get("id") or call.get("tool_call_id"))
+    for call in raw_calls
+    if isinstance(call, dict) and (call.get("id") or call.get("tool_call_id"))
+  }
+  while start < len(entries) and entries[start].role == MemoryRole.TOOL:
+    next_entry = entries[start]
+    tool_call_id = next_entry.metadata.get("tool_call_id")
+    if call_ids and str(tool_call_id) not in call_ids:
+      break
+    removed.append(entries.pop(start))
+  return removed
+
+
+def _complete_protocol_prefix_length(entries: list[MemoryEntry], target: int) -> int:
+  """Round a history prefix up to complete assistant/tool exchanges."""
+  index = 0
+  while index < target and index < len(entries):
+    entry = entries[index]
+    index += 1
+    if entry.role != MemoryRole.ASSISTANT:
+      continue
+    raw_calls = entry.metadata.get("tool_calls")
+    if not isinstance(raw_calls, list):
+      continue
+    call_ids = {
+      str(call.get("id") or call.get("tool_call_id"))
+      for call in raw_calls
+      if isinstance(call, dict) and (call.get("id") or call.get("tool_call_id"))
+    }
+    while index < len(entries) and entries[index].role == MemoryRole.TOOL:
+      tool_call_id = entries[index].metadata.get("tool_call_id")
+      if call_ids and str(tool_call_id) not in call_ids:
+        break
+      index += 1
+  return index
+
+
+def _latest_user_entry(entries: list[MemoryEntry]) -> MemoryEntry | None:
+  return next((entry for entry in reversed(entries) if entry.role == MemoryRole.USER), None)
+
+
 # --------------------------------------------------------------------------- #
 # WorkingMemory
 # --------------------------------------------------------------------------- #
@@ -115,6 +173,7 @@ class WorkingMemory:
 
     system_entries = [e for e in self.entries if e.role == MemoryRole.SYSTEM]
     chat_entries = [e for e in self.entries if e.role != MemoryRole.SYSTEM]
+    latest_user = _latest_user_entry(chat_entries)
 
     # If we have a summary_llm and enough chat history, summarise instead
     # of blindly dropping.
@@ -122,8 +181,20 @@ class WorkingMemory:
       await self._summarise_and_compress(system_entries, chat_entries)
     else:
       while chat_entries and total > self.max_tokens:
-        removed = chat_entries.pop(0)
-        total -= removed.tokens
+        # An assistant tool-call message and every one of its tool responses
+        # form one protocol unit.  Evicting only the assistant leaves orphaned
+        # ``role=tool`` messages, which OpenAI-compatible APIs reject on the
+        # next request.  The ReAct loop defers budget enforcement until a
+        # complete batch is present; this fallback also keeps ordinary sliding
+        # window eviction structurally valid.
+        # Preserve the latest user instruction. It is the task contract for
+        # the current turn (often including literal paths or replacement
+        # strings), while earlier assistant/tool exchanges are expendable.
+        start = 1 if chat_entries[0] is latest_user else 0
+        if start >= len(chat_entries):
+          break
+        removed = _pop_protocol_unit(chat_entries, start)
+        total -= sum(entry.tokens for entry in removed)
       self.entries = system_entries + chat_entries
 
   async def _summarise_and_compress(
@@ -132,9 +203,27 @@ class WorkingMemory:
     chat_entries: list[MemoryEntry],
   ) -> None:
     """Replace the oldest chunk of chat history with an LLM summary."""
-    num_to_summarise = min(5, len(chat_entries) - 1)
-    to_summarise = chat_entries[:num_to_summarise]
-    kept_chats = chat_entries[num_to_summarise:]
+    latest_user = _latest_user_entry(chat_entries)
+    protected_prefix = 1 if chat_entries and chat_entries[0] is latest_user else 0
+    available = chat_entries[protected_prefix:]
+    num_to_summarise = _complete_protocol_prefix_length(
+      available, min(5, max(0, len(available) - 1)),
+    )
+    to_summarise = available[:num_to_summarise]
+    kept_chats = chat_entries[:protected_prefix] + available[num_to_summarise:]
+
+    # There is no safe older exchange to summarise without replacing the
+    # active user task. Fall back to protocol-aware sliding-window trimming.
+    if not to_summarise:
+      total = sum(entry.tokens for entry in self.entries)
+      while chat_entries and total > self.max_tokens:
+        start = 1 if chat_entries[0] is latest_user else 0
+        if start >= len(chat_entries):
+          break
+        removed = _pop_protocol_unit(chat_entries, start)
+        total -= sum(entry.tokens for entry in removed)
+      self.entries = system_entries + chat_entries
+      return
 
     prompt = (
       "Please summarise the following conversation into a short summary, "
@@ -160,20 +249,32 @@ class WorkingMemory:
       chat_entries_2 = [e for e in self.entries if e.role != MemoryRole.SYSTEM]
       system_entries_2 = [e for e in self.entries if e.role == MemoryRole.SYSTEM]
       while chat_entries_2 and total > self.max_tokens:
-        removed = chat_entries_2.pop(0)
-        total -= removed.tokens
+        latest_user_2 = _latest_user_entry(chat_entries_2)
+        start = 1 if chat_entries_2[0] is latest_user_2 else 0
+        if start >= len(chat_entries_2):
+          break
+        removed = _pop_protocol_unit(chat_entries_2, start)
+        total -= sum(entry.tokens for entry in removed)
       self.entries = system_entries_2 + chat_entries_2
 
   # ------------------------------------------------------------------ #
   # Public API
   # ------------------------------------------------------------------ #
 
-  async def add(self, content: str, role: MemoryRole, **metadata: Any) -> None:
+  async def add(
+    self,
+    content: str,
+    role: MemoryRole,
+    *,
+    defer_budget: bool = False,
+    **metadata: Any,
+  ) -> None:
     """Add a new message to the context window and (optionally) the backend."""
     tokens = self._count_tokens(content)
     entry = MemoryEntry(role=role, content=content, metadata=metadata, tokens=tokens)
     self.entries.append(entry)
-    await self._enforce_budget()
+    if not defer_budget:
+      await self._enforce_budget()
 
     # Async push to persistent backend — safe fire-and-forget with
     # exception logging and graceful flush support.
@@ -183,6 +284,15 @@ class WorkingMemory:
       )
       self._pending_tasks.add(task)
       task.add_done_callback(self._pending_tasks.discard)
+
+  async def enforce_budget(self) -> None:
+    """Apply context trimming after callers append an atomic message batch.
+
+    ReAct uses this after all results for one assistant tool-call message have
+    been recorded.  It prevents a large early result from evicting the parent
+    assistant message before later sibling results are appended.
+    """
+    await self._enforce_budget()
 
   async def _safe_backend_add(self, content: str, metadata: dict[str, Any]) -> None:
     """Wrap backend.add() so exceptions are logged, not swallowed."""

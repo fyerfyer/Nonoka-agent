@@ -8,7 +8,11 @@ from nonoka import Agent, Runner, tool
 from nonoka.core.extensions import ExtensionDecision, LoopExtensionContext, LoopExtensionManager
 from nonoka.core.llm import LLMResponse
 from nonoka.core.paradigm import EvaluationResult
-from nonoka.ext.coding import CodeStrategy, CodeStrategyRouter, ResponseGroundingExtension, VerifierRepairExtension
+from nonoka.ext.coding import (
+  CodeStrategy, CodeStrategyRouter, CodingWorkflow, ResponseGroundingExtension,
+  TerminalCodingWorkflow, TerminalCommandEvaluator, VerifierDiagnosticCode, VerifierRepairExtension,
+  WorkspaceProgressExtension,
+)
 
 
 class ScriptedProvider:
@@ -130,3 +134,77 @@ def test_code_strategy_router_requires_explicit_verifier_capability():
   assert router.choose(deterministic_verifier=True, requires_workspace=True) is CodeStrategy.VERIFIED_REPAIR
   with pytest.raises(ValueError, match="requires a deterministic evaluator"):
     router.extensions_for(CodeStrategy.VERIFIED_REPAIR, evaluator=None)
+
+
+def test_coding_workflow_defaults_to_direct_without_workspace():
+  workflow = CodingWorkflow()
+  agent = workflow.build_agent(model="fake", tools=[])
+
+  assert workflow.resolve_strategy() is CodeStrategy.DIRECT
+  assert list(agent.tools) == []
+
+
+def test_terminal_workflow_requires_explicit_verify_command_for_repair():
+  class Evaluator:
+    async def evaluate(self, _result):
+      return EvaluationResult(passed=True)
+
+  workflow = TerminalCodingWorkflow(
+    requires_workspace=True, evaluator=Evaluator(), strategy=CodeStrategy.VERIFIED_REPAIR,
+  )
+  with pytest.raises(ValueError, match="explicit verify_command"):
+    workflow.resolve_strategy()
+
+
+@pytest.mark.asyncio
+async def test_terminal_command_evaluator_uses_only_explicit_command_and_reports_failure():
+  commands: list[tuple[str, ...]] = []
+
+  async def execute(command: tuple[str, ...]):
+    commands.append(command)
+    return {"exit_code": 1, "stdout": "", "stderr": "AssertionError: expected 2"}
+
+  evaluator = TerminalCommandEvaluator(("pytest", "-q", "tests/test_target.py"), execute)
+  report = await evaluator.evaluate(None)
+
+  assert commands == [("pytest", "-q", "tests/test_target.py")]
+  assert report.passed is False
+  assert report.diagnostic is not None
+  assert report.diagnostic.code is VerifierDiagnosticCode.TEST_FAILURE
+  assert "AssertionError" in report.message
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_extension_reminds_only_after_exploration_budget():
+  extension = WorkspaceProgressExtension(max_exploration_turns=2)
+  session = type("Session", (), {})()
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="edit the workspace", turn=1,
+    tool_calls=[{"function": {"arguments": '{"command":"find . -type f"}'}}],
+  )
+
+  first = await extension.after_tool_batch(context)
+  context.turn = 2
+  second = await extension.after_tool_batch(context)
+  context.turn = 3
+  context.tool_calls = [{"function": {"arguments": '{"command":"sed -i s/old/new/ file"}'}}]
+  third = await extension.after_tool_batch(context)
+
+  assert first.feedback is None
+  assert "workspace change" in (second.feedback or "")
+  assert third.details["mutation_command_seen"] is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_extension_does_not_treat_stderr_redirect_as_mutation():
+  extension = WorkspaceProgressExtension(max_exploration_turns=1)
+  session = type("Session", (), {})()
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="edit", turn=1,
+    tool_calls=[{"function": {"arguments": '{"command":"find / -name target 2>/dev/null"}'}}],
+  )
+
+  decision = await extension.after_tool_batch(context)
+
+  assert decision.details["mutation_command_seen"] is False
+  assert "workspace change" in (decision.feedback or "")

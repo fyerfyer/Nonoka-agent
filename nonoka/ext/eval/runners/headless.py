@@ -9,13 +9,13 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from nonoka import Agent, Runner
+from nonoka import Runner
 from nonoka.core.paradigm import EvaluationResult
 from nonoka.ext.eval.checkers import CodeChecker, ToolUseChecker
 from nonoka.ext.eval.models import EvalResult, EvalSample
 from nonoka.ext.eval.runners.hooks import UsageHooks
 from nonoka.ext.eval.tools import EvalDeps, get_eval_tools
-from nonoka.ext.coding import CodeStrategy, CodeStrategyRouter
+from nonoka.ext.coding import CodeStrategy, CodingWorkflow
 
 
 class HeadlessEvalRunner:
@@ -27,7 +27,7 @@ class HeadlessEvalRunner:
     max_turns: int = 8,
     timeout_seconds: float = 90.0,
     temperature: float | None = 0.0,
-    strategy: str = "tool_assisted",
+    strategy: str = "auto",
     max_verifier_iterations: int = 2,
     runner_factory: Callable[[UsageHooks], Runner] | None = None,
   ) -> None:
@@ -35,8 +35,8 @@ class HeadlessEvalRunner:
     self.max_turns = max_turns
     self.timeout_seconds = timeout_seconds
     self.temperature = temperature
-    if strategy not in {"direct", "tool_assisted", "verified_repair"}:
-      raise ValueError("strategy must be direct, tool_assisted, or verified_repair")
+    if strategy not in {"auto", "direct", "tool_assisted", "verified_repair"}:
+      raise ValueError("strategy must be auto, direct, tool_assisted, or verified_repair")
     self.strategy = strategy
     self.max_verifier_iterations = max(1, max_verifier_iterations)
     self._runner_factory = runner_factory
@@ -48,26 +48,24 @@ class HeadlessEvalRunner:
       self._seed_workspace(root, sample)
       deps = EvalDeps(root)
       hooks = UsageHooks()
-      strategy = "direct" if baseline else self.strategy
+      strategy = "direct" if baseline else self._strategy_for(sample)
       evaluator = _WorkspaceEvaluator(sample, root, deps) if strategy == "verified_repair" else None
-      extensions = CodeStrategyRouter().extensions_for(CodeStrategy(strategy), evaluator)
-      agent = Agent(
+      workflow = CodingWorkflow(
+        requires_workspace=strategy != "direct", evaluator=evaluator,
+        strategy=CodeStrategy(strategy), max_repairs=self.max_verifier_iterations,
+      )
+      agent = workflow.build_agent(
         model=self.model,
-        tools=[] if strategy == "direct" else get_eval_tools(),
+        tools=get_eval_tools(),
         system_prompt=self._system_prompt(sample, strategy == "direct"),
         max_turns=1 if strategy == "direct" else self.max_turns,
         max_steps=40,
         temperature=self.temperature,
-        extensions=extensions,
       )
       runner = self._runner_factory(hooks) if self._runner_factory else Runner(
         checkpoint="memory", memory="in_memory", hooks=hooks,
       )
       try:
-        if evaluator is not None:
-          # Keep the repair bounded per evaluation, rather than relying on a
-          # global Agent default.
-          extensions[0].max_repairs = self.max_verifier_iterations
         execution = runner.run_react(agent, sample.prompt, deps=deps)
         result = await asyncio.wait_for(execution, timeout=self.timeout_seconds)
       except TimeoutError:
@@ -107,6 +105,14 @@ class HeadlessEvalRunner:
 
   async def evaluate_many(self, samples: list[EvalSample], *, baseline: bool = False) -> list[EvalResult]:
     return [await self.evaluate(sample, baseline=baseline) for sample in samples]
+
+  def _strategy_for(self, sample: EvalSample) -> str:
+    if self.strategy != "auto":
+      return self.strategy
+    # Direct generation is the conservative default for standalone code;
+    # workspace/tool-use tasks retain the tool loop because their observable
+    # success criterion includes filesystem interaction.
+    return "direct" if sample.kind == "code" else "tool_assisted"
 
   @staticmethod
   def _seed_workspace(root: Path, sample: EvalSample) -> None:
@@ -150,10 +156,15 @@ class _WorkspaceEvaluator:
 
   async def evaluate(self, _result) -> EvaluationResult:
     if self.sample.kind == "code":
-      passed, feedback = CodeChecker().check(self.sample, self.root)
+      report = CodeChecker().check_detailed(self.sample, self.root)
+      passed, feedback = report.passed, report.message
+      details = report.details
     else:
       passed, feedback = ToolUseChecker().check(self.sample, self.root, self.deps)
-    return EvaluationResult(passed=passed, feedback=feedback, score=1.0 if passed else 0.0)
+      details = {}
+    return EvaluationResult(
+      passed=passed, feedback=feedback, score=1.0 if passed else 0.0, details=details,
+    )
 
 
 def _extract_code(output: str) -> str:

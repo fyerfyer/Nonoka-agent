@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from nonoka import ExternalCapability, Runner
+from nonoka import ExternalCapability, ExternalToolReceipt, Runner, ToolExecution, WorkspaceAttestation
 from nonoka.core.agent import Agent
 from nonoka.core.context import RunContext
 from nonoka.core.errors import ExternalToolExecutionRequiredError
@@ -83,6 +83,21 @@ def test_external_capability_metadata_not_in_schema():
   assert "metadata" not in schema["function"]
 
 
+def test_external_workspace_mutation_requires_host_attestation():
+  capability = ExternalCapability(
+    name="write_file", description="Write a file", parameters={"type": "object"},
+    execution=ToolExecution(mutates_workspace=True),
+  )
+
+  assert capability.requires_workspace_attestation is True
+  receipt = ExternalToolReceipt(
+    result="written", workspace=WorkspaceAttestation(
+      root="/workspace", before_digest="before", after_digest="after", created=("answer.txt",),
+    ),
+  )
+  assert receipt.workspace.created == ("answer.txt",)
+
+
 def test_external_capability_to_json_schema():
   cap = _ExternalCapability("bash", "Run shell commands", {"type": "object", "properties": {}})
   schema = cap.to_json_schema()
@@ -144,7 +159,7 @@ async def test_run_stream_pauses_on_external_tool():
 
   # Mock the LLM to force a tool call.
   class _FakeLLM:
-    async def chat_stream(self, messages, tools=None):
+    async def chat_stream(self, messages, tools=None, **_kwargs):
       yield type("Chunk", (), {"content_delta": "", "tool_call_deltas": None, "finish_reason": None})()
       yield type(
         "Chunk",
@@ -202,7 +217,7 @@ async def test_resume_external_tools_injects_result_and_continues():
 
   # Mock the LLM final response after the tool result is injected.
   class _FakeLLM:
-    async def chat_stream(self, messages, tools=None):
+    async def chat_stream(self, messages, tools=None, **_kwargs):
       # The resumed session should see a user msg, assistant tool_call, and tool result.
       yield type("Chunk", (), {"content_delta": "done", "tool_call_deltas": None, "finish_reason": "stop"})()
 
@@ -224,3 +239,27 @@ async def test_resume_external_tools_injects_result_and_continues():
   final = next((e for e in events if e.type == "final"), None)
   assert final is not None
   assert final.data.get("success") is True
+
+
+@pytest.mark.asyncio
+async def test_resume_external_mutation_rejects_missing_workspace_attestation():
+  capability = ExternalCapability(
+    name="write_file", description="Write", parameters={"type": "object"},
+    execution=ToolExecution(mutates_workspace=True),
+  )
+  agent = Agent(model="gpt-4o", tools=[capability])
+  runner = Runner(checkpoint="memory", memory="disabled")
+  session = await runner._create_session(agent, deps=None, session_id="audit-sess")
+  await session.memory.add("write", MemoryRole.USER)
+  await session.memory.add(
+    "", MemoryRole.ASSISTANT,
+    tool_calls=[{"id": "call_1", "function": {"name": "write_file", "arguments": "{}"}}],
+  )
+  session.status = "paused"
+  await runner.checkpoint_store.save_session("audit-sess", session.to_state())
+
+  with pytest.raises(ValueError, match="workspace attestation"):
+    async for _ in runner.resume_external_tools(
+      agent, deps=None, session_id="audit-sess", results={"call_1": "written"},
+    ):
+      pass

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from nonoka.ext.eval.datasets.base import DatasetLoader, DatasetLoaderError
 from nonoka.ext.eval.datasets.builtins import load_humaneval, load_mbpp, load_tool_use
+from nonoka.ext.eval.datasets.complex_mbpp import load_complex_mbpp_v1
 from nonoka.ext.eval.models import EvalSample
 
 
@@ -45,6 +46,10 @@ _REGISTRY.register(DatasetDefinition(
 _REGISTRY.register(DatasetDefinition(
   "mbpp", "Google MBPP sanitized code-generation tasks (official dataset loader).",
   "google-research-datasets/mbpp", load_mbpp,
+))
+_REGISTRY.register(DatasetDefinition(
+  "mbpp-complex-v1", "Versioned 20-task complex slice of sanitized MBPP for paired strategy comparisons.",
+  "google-research-datasets/mbpp (fixture mbpp-complex-v1)", load_complex_mbpp_v1,
 ))
 _REGISTRY.register(DatasetDefinition(
   "tool_use", "Bundled deterministic filesystem/tool-use smoke and regression tasks (not a public benchmark).",

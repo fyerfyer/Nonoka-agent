@@ -118,6 +118,29 @@ async def test_working_memory_sliding_window():
 
 
 @pytest.mark.asyncio
+async def test_working_memory_evicts_a_complete_tool_call_batch():
+  """Context trimming must never leave a provider-invalid orphan tool result."""
+  memory = WorkingMemory(
+    session_id="tool-batch", max_tokens=10, token_counter=len,
+  )
+  tool_calls = [
+    {"id": "call-1", "function": {"name": "inspect", "arguments": "{}"}},
+    {"id": "call-2", "function": {"name": "inspect", "arguments": "{}"}},
+  ]
+
+  await memory.add("user", MemoryRole.USER)
+  await memory.add("calls", MemoryRole.ASSISTANT, tool_calls=tool_calls)
+  # A ReAct tool batch is appended atomically for memory-budget purposes.
+  await memory.add("first-result", MemoryRole.TOOL, defer_budget=True, tool_call_id="call-1")
+  await memory.add("second-result", MemoryRole.TOOL, defer_budget=True, tool_call_id="call-2")
+  await memory.enforce_budget()
+
+  assert [entry.content for entry in memory.entries if entry.role == MemoryRole.USER] == ["user"]
+  assert not [entry for entry in memory.entries if entry.role == MemoryRole.TOOL]
+  assert not [entry for entry in memory.entries if entry.role == MemoryRole.ASSISTANT]
+
+
+@pytest.mark.asyncio
 async def test_working_memory_summary_strategy():
   """When summary_llm is provided, WorkingMemory auto-summarises old chats."""
   mock_llm = MockLLMProvider()

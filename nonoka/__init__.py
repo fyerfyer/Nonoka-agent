@@ -44,7 +44,7 @@ from nonoka.core.tool_response import (
 from nonoka.core.system_prompts import SystemPromptTemplate
 from nonoka.config import Config, ConfigLoadError
 from nonoka.core.builder import AgentBuilder, RunnerBuilder
-from nonoka.core.external_tool import ExternalCapability
+from nonoka.core.external_tool import ExternalCapability, ExternalToolReceipt, WorkspaceAttestation
 from nonoka.core.external_mcp import (
   ExternalMCPRegistry,
   ExternalMCPServer,
@@ -108,6 +108,8 @@ __all__ = [
   "RunnerBuilder",
   # External registries
   "ExternalCapability",
+  "ExternalToolReceipt",
+  "WorkspaceAttestation",
   "ExternalMCPRegistry",
   "ExternalMCPServer",
   "ExternalMCPToolDefinition",

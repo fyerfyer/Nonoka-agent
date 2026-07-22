@@ -88,6 +88,14 @@ class ExecutionTrace:
     else:
       entry["result"] = redact(result)
 
+  def record_external_receipt(self, call_id: str, receipt: Any, *, verified: bool) -> None:
+    """Attach a host execution receipt to its original delegated tool call."""
+    for entry in reversed(self.tool_calls):
+      if entry.get("id") == call_id:
+        entry["external_receipt"] = redact(receipt)
+        entry["workspace_audit"] = "verified" if verified else "unverified"
+        return
+
   def record_verification(self, **data: Any) -> None:
     self.verifications.append({"at": _now(), **redact(data)})
 
