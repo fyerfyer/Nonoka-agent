@@ -72,6 +72,26 @@ def _sanitize_proxy_for_tau() -> None:
       os.environ.pop(key, None)
 
 
+def _configure_official_evaluator() -> None:
+  """Point τ³'s built-in NL judge at the configured benchmark model.
+
+  The official harness otherwise hard-codes an OpenAI-only GPT default for
+  natural-language assertions.  Nonoka intentionally keeps τ³'s evaluator;
+  this only supplies the model identifier used by that evaluator so an
+  OpenAI-compatible endpoint can score every task in the same run.
+  """
+  model = os.environ.get("NONOKA_TAU_EVALUATOR_MODEL")
+  if not model:
+    return
+  from tau2.evaluator import evaluator_nl_assertions
+
+  # τ³'s pinned LiteLLM requires an explicit provider for custom OpenAI
+  # endpoints, whereas Nonoka accepts the configured model alias directly.
+  evaluator_nl_assertions.DEFAULT_LLM_NL_ASSERTIONS = (
+    model if "/" in model else f"openai/{model}"
+  )
+
+
 def _tau_message_to_nonoka(message: Any) -> dict[str, Any]:
   from tau2.data_model.message import AssistantMessage, SystemMessage, ToolMessage, UserMessage
 
@@ -235,6 +255,7 @@ def _register_components() -> None:
 
 def main() -> int:
   _sanitize_proxy_for_tau()
+  _configure_official_evaluator()
   _register_components()
   from tau2.cli import main as tau_main
   try:

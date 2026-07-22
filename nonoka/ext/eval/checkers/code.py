@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from nonoka.ext.eval.models import EvalSample
@@ -20,6 +21,10 @@ class CodeChecker:
     else:
       harness = "\n".join(str(test) for test in tests) + "\n"
     harness_path = root / "_nonoka_eval_test.py"
+    # A repair can overwrite solution.py several times within one filesystem
+    # timestamp tick.  Remove bytecode produced by an earlier verifier so an
+    # import never executes a stale, same-size candidate implementation.
+    shutil.rmtree(root / "__pycache__", ignore_errors=True)
     harness_path.write_text("from solution import *\n" + harness, encoding="utf-8")
     result = PythonSandbox(root).run_file(harness_path)
     if result.timed_out:

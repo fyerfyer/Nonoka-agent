@@ -175,6 +175,7 @@ def run_tau2_bench(
   output.mkdir(parents=True, exist_ok=True)
   environment = os.environ.copy()
   environment.setdefault("NONOKA_TAU_BRIDGE_PYTHON", sys.executable)
+  environment.setdefault("NONOKA_TAU_EVALUATOR_MODEL", model)
   command = [
     str(status["interpreter"]), str(Path(__file__).with_name("tau2_adapter.py")), "run",
     "--domain", domain,
@@ -210,6 +211,11 @@ def run_evalplus(dataset: str, candidates: Path, parallel: int = 1) -> Path:
     str(status["interpreter"]), str(Path(__file__).with_name("evalplus_adapter.py")), "evaluate",
     "--dataset", dataset, "--samples", str(candidates), "--parallel", str(parallel),
   ]
-  if subprocess.run(command, check=False).returncode:
-    raise RuntimeError("Official EvalPlus verification failed.")
-  return candidates.with_name(f"{candidates.stem}_eval_results.json")
+  result_path = candidates.with_name(f"{candidates.stem}_eval_results.json")
+  # EvalPlus uses a non-zero process status when any candidate fails its
+  # strengthened tests.  That is a scored benchmark outcome, not harness
+  # failure, provided it emitted the official result artifact.
+  returncode = subprocess.run(command, check=False).returncode
+  if returncode and not result_path.is_file():
+    raise RuntimeError("Official EvalPlus verification failed before producing results.")
+  return result_path

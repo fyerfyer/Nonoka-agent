@@ -135,6 +135,61 @@ async def search_web(ctx, query: str, cursor: str | None = None) -> ToolResponse
     )
 ```
 
+## Stateful tools and execution traces
+
+Tools can declare execution semantics.  Explicit reads may run concurrently;
+stateful, mutating, exclusive, and unknown capabilities are serialized in
+deterministic source order.
+
+```python
+from nonoka import ToolExecution, tool
+
+@tool(execution=ToolExecution(stateful_action=True, mutates_workspace=True))
+async def run_terminal(command: str) -> str:
+    ...
+
+@tool(execution=ToolExecution(read_only=True, pagination=True))
+async def read_log(cursor: str | None = None) -> str:
+    ...
+```
+
+Each `RunResult` carries a bounded, credential-redacted `trace`.  It includes
+LLM request/response usage, tool timings/results, verifier outcomes, and the
+final termination reason, making it suitable for benchmark artifacts without
+leaking API keys.
+
+```python
+result = await Runner().run_react(agent, "Inspect and fix the service", deps=None)
+print(result.trace["termination"])
+```
+
+## Optional loop extensions
+
+The default loop retains its conservative tool scheduler and progress guard.
+Optional extensions can add bounded feedback at well-defined points without
+changing tool calls, concurrency, or run budgets.  Their decisions are also
+recorded in `result.trace["extensions"]`.
+
+```python
+from nonoka import Agent, Runner
+from nonoka.ext.coding import VerifierRepairExtension
+
+# evaluator implements: async evaluate(RunResult) -> EvaluationResult
+agent = Agent(
+    model="gpt-4o",
+    tools=[...],
+    extensions=[VerifierRepairExtension(evaluator, max_repairs=2)],
+)
+result = await Runner().run_react(agent, "Implement and verify the fix", deps=None)
+```
+
+`VerifierRepairExtension` requests another normal ReAct turn only after a
+deterministic verifier fails. `ResponseGroundingExtension` can similarly
+validate a final natural-language claim against tool-established state. Use
+`CodeStrategyRouter` to choose `direct`, `tool_assisted`, or
+`verified_repair` from caller-known task capabilities rather than enabling an
+expensive tool loop for every code-generation prompt.
+
 ## Gateway (IM Platform Integration)
 
 `Gateway` standardizes requests from QQ, Telegram, Discord, etc. and routes them to Agents, then pushes Agent outputs back to the original platforms.

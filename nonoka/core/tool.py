@@ -10,6 +10,7 @@ from typing import Any, get_type_hints
 from pydantic import TypeAdapter, create_model
 
 from nonoka.core.types import Capability, RetryPolicy
+from nonoka.core.execution import ToolExecution, UNKNOWN_EXECUTION
 from nonoka.core.context import RunContext
 
 
@@ -50,6 +51,7 @@ class Tool(Capability):
     description: str | None = None,
     default_retry: RetryPolicy | None = None,
     default_timeout: float | None = None,
+    execution: ToolExecution | None = None,
   ):
     self._func = func
     self._is_async = inspect.iscoroutinefunction(func)
@@ -57,6 +59,7 @@ class Tool(Capability):
     self._description = description or inspect.getdoc(func) or ""
     self.default_retry = default_retry or RetryPolicy()
     self.default_timeout = default_timeout
+    self._execution = execution or UNKNOWN_EXECUTION
     self._sig = inspect.signature(func)
     self._type_hints = get_type_hints(func)
 
@@ -80,6 +83,10 @@ class Tool(Capability):
   @property
   def parameters(self) -> dict[str, Any]:
     return self._parameters_schema
+
+  @property
+  def execution(self) -> ToolExecution:
+    return self._execution
 
   async def __call__(self, *args: Any, **kwargs: Any) -> Any:
     """Allow calling the tool directly like a normal async function.
@@ -174,6 +181,7 @@ def tool(
   description: str | None = None,
   default_retry: RetryPolicy | None = None,
   default_timeout: float | None = None,
+  execution: ToolExecution | None = None,
 ):
   """
   Decorator for exposing tools
@@ -190,6 +198,7 @@ def tool(
       description=description,
       default_retry=default_retry,
       default_timeout=default_timeout,
+      execution=execution,
     )
 
   if func is None:

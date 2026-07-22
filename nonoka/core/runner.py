@@ -263,6 +263,16 @@ class Runner:
 
     return session
 
+  @staticmethod
+  def _attach_trace(result: RunResult) -> RunResult:
+    """Expose the session trace without making callers reach into Session."""
+    if result.session is not None and hasattr(result.session, "trace"):
+      result.session.trace.finish(
+        success=result.success, error_type=result.error_type, error=result.error,
+      )
+      result.trace = result.session.trace.to_dict()
+    return result
+
   async def _inherit_memory(self, parent_session_id: str, session: Session) -> None:
     """Copy memory entries from a parent session into the child session."""
     parent_state = await self.checkpoint_store.load_session(parent_session_id)
@@ -314,6 +324,11 @@ class Runner:
     hook_ctx = HookContext(session=session, runner=self)
     await self.hooks.emit_session_start(hook_ctx)
     result = await paradigm.run(session, self, prompt=prompt)
+    from nonoka.core.extensions import LoopExtensionContext, LoopExtensionManager
+    await LoopExtensionManager(list(getattr(agent, "extensions", []))).after_run(
+      LoopExtensionContext(session=session, runner=self, prompt=prompt, turn=session.turn_count), result,
+    )
+    result = self._attach_trace(result)
     await self.hooks.emit_session_end(hook_ctx, result)
     return result
 
@@ -466,7 +481,7 @@ class Runner:
     executor = PlanExecutor()
     hook_ctx = HookContext(session=session, runner=self)
     await self.hooks.emit_session_start(hook_ctx)
-    result = await executor.execute(plan, session, self)
+    result = self._attach_trace(await executor.execute(plan, session, self))
     await self.hooks.emit_session_end(hook_ctx, result)
     return result
 
@@ -506,6 +521,11 @@ class Runner:
     hook_ctx = HookContext(session=session, runner=self)
     await self.hooks.emit_session_start(hook_ctx)
     result = await reflective.run(session, self, prompt=prompt)
+    from nonoka.core.extensions import LoopExtensionContext, LoopExtensionManager
+    await LoopExtensionManager(list(getattr(agent, "extensions", []))).after_run(
+      LoopExtensionContext(session=session, runner=self, prompt=prompt, turn=session.turn_count), result,
+    )
+    result = self._attach_trace(result)
     await self.hooks.emit_session_end(hook_ctx, result)
     return result
 

@@ -10,10 +10,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from nonoka import Agent, Runner
+from nonoka.core.paradigm import EvaluationResult
 from nonoka.ext.eval.checkers import CodeChecker, ToolUseChecker
 from nonoka.ext.eval.models import EvalResult, EvalSample
 from nonoka.ext.eval.runners.hooks import UsageHooks
 from nonoka.ext.eval.tools import EvalDeps, get_eval_tools
+from nonoka.ext.coding import CodeStrategy, CodeStrategyRouter
 
 
 class HeadlessEvalRunner:
@@ -25,12 +27,18 @@ class HeadlessEvalRunner:
     max_turns: int = 8,
     timeout_seconds: float = 90.0,
     temperature: float | None = 0.0,
+    strategy: str = "tool_assisted",
+    max_verifier_iterations: int = 2,
     runner_factory: Callable[[UsageHooks], Runner] | None = None,
   ) -> None:
     self.model = model
     self.max_turns = max_turns
     self.timeout_seconds = timeout_seconds
     self.temperature = temperature
+    if strategy not in {"direct", "tool_assisted", "verified_repair"}:
+      raise ValueError("strategy must be direct, tool_assisted, or verified_repair")
+    self.strategy = strategy
+    self.max_verifier_iterations = max(1, max_verifier_iterations)
     self._runner_factory = runner_factory
 
   async def evaluate(self, sample: EvalSample, *, baseline: bool = False) -> EvalResult:
@@ -40,30 +48,39 @@ class HeadlessEvalRunner:
       self._seed_workspace(root, sample)
       deps = EvalDeps(root)
       hooks = UsageHooks()
+      strategy = "direct" if baseline else self.strategy
+      evaluator = _WorkspaceEvaluator(sample, root, deps) if strategy == "verified_repair" else None
+      extensions = CodeStrategyRouter().extensions_for(CodeStrategy(strategy), evaluator)
       agent = Agent(
         model=self.model,
-        tools=[] if baseline else get_eval_tools(),
-        system_prompt=self._system_prompt(sample, baseline),
-        max_turns=1 if baseline else self.max_turns,
+        tools=[] if strategy == "direct" else get_eval_tools(),
+        system_prompt=self._system_prompt(sample, strategy == "direct"),
+        max_turns=1 if strategy == "direct" else self.max_turns,
         max_steps=40,
         temperature=self.temperature,
+        extensions=extensions,
       )
       runner = self._runner_factory(hooks) if self._runner_factory else Runner(
         checkpoint="memory", memory="in_memory", hooks=hooks,
       )
       try:
-        result = await asyncio.wait_for(
-          runner.run_react(agent, sample.prompt, deps=deps), timeout=self.timeout_seconds,
-        )
+        if evaluator is not None:
+          # Keep the repair bounded per evaluation, rather than relying on a
+          # global Agent default.
+          extensions[0].max_repairs = self.max_verifier_iterations
+        execution = runner.run_react(agent, sample.prompt, deps=deps)
+        result = await asyncio.wait_for(execution, timeout=self.timeout_seconds)
       except TimeoutError:
         return EvalResult(
-          sample_id=sample.id, success=False, runner_type="direct" if baseline else "agent",
+          sample_id=sample.id, success=False, runner_type="direct" if strategy == "direct" else "agent",
+          strategy=strategy,
           error="evaluation timed out", tool_trace=list(deps.tool_trace),
           metrics=self._metrics(None, hooks, time.monotonic() - start),
         )
       except Exception as exc:
         return EvalResult(
-          sample_id=sample.id, success=False, runner_type="direct" if baseline else "agent",
+          sample_id=sample.id, success=False, runner_type="direct" if strategy == "direct" else "agent",
+          strategy=strategy,
           error=f"{type(exc).__name__}: {exc}", tool_trace=list(deps.tool_trace),
           metrics=self._metrics(None, hooks, time.monotonic() - start),
         )
@@ -82,9 +99,10 @@ class HeadlessEvalRunner:
         success, message = ToolUseChecker().check(sample, root, deps)
       metrics = self._metrics(result.session, hooks, time.monotonic() - start)
       return EvalResult(
-        sample_id=sample.id, success=success, runner_type="direct" if baseline else "agent",
+        sample_id=sample.id, success=success, runner_type="direct" if strategy == "direct" else "agent",
+        strategy=strategy,
         output=output, candidate_code=candidate_code, verifier_message=message,
-        tool_trace=list(deps.tool_trace), metrics=metrics,
+        tool_trace=list(deps.tool_trace), metrics=metrics, trace=result.trace,
       )
 
   async def evaluate_many(self, samples: list[EvalSample], *, baseline: bool = False) -> list[EvalResult]:
@@ -120,6 +138,22 @@ class HeadlessEvalRunner:
     metrics.turns = int(getattr(session, "turn_count", 0)) if session is not None else 0
     metrics.wall_time_seconds = elapsed
     return metrics
+
+
+class _WorkspaceEvaluator:
+  """Deterministic verifier used only by the explicit repair strategy."""
+
+  def __init__(self, sample: EvalSample, root: Path, deps: EvalDeps) -> None:
+    self.sample = sample
+    self.root = root
+    self.deps = deps
+
+  async def evaluate(self, _result) -> EvaluationResult:
+    if self.sample.kind == "code":
+      passed, feedback = CodeChecker().check(self.sample, self.root)
+    else:
+      passed, feedback = ToolUseChecker().check(self.sample, self.root, self.deps)
+    return EvaluationResult(passed=passed, feedback=feedback, score=1.0 if passed else 0.0)
 
 
 def _extract_code(output: str) -> str:

@@ -28,6 +28,7 @@ class RunResult(Generic[ResultT]):
   session: Any | None = None
   error: str | None = None
   error_type: str | None = None  # "llm_error" | "tool_error" | "timeout" | "cancelled" | ...
+  trace: dict[str, Any] | None = None
 
 
 @dataclass
@@ -51,6 +52,9 @@ class Capability(Protocol):
 
   @property
   def parameters(self) -> dict[str, Any]: ...
+
+  @property
+  def execution(self) -> Any: ...
 
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any: ...
 

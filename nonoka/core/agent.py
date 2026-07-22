@@ -54,6 +54,10 @@ class Agent(Generic[DepsT, ResultT]):
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
 
+  # Optional bounded enhancements executed by ReAct.  They may provide
+  # feedback and final-answer validation but cannot override core tool safety.
+  extensions: list[Any] = field(default_factory=list)
+
   # Skills — pre-configured capability packages expanded at construction time
   skills: list["Skill"] = field(default_factory=list)
 

@@ -29,6 +29,8 @@ from nonoka.core.errors import (
 from nonoka.core.scheduler import _resolve_refs
 from nonoka.core.hooks import HookContext
 from nonoka.core.tool_response import unwrap_tool_response
+from nonoka.core.execution import ToolExecutionCoordinator, execution_for
+from nonoka.core.extensions import LoopExtension, LoopExtensionContext, LoopExtensionManager
 
 _logger = get_logger("nonoka.paradigm")
 
@@ -79,6 +81,7 @@ class ReActAgent:
     max_concurrency: int | None = None,
     max_repeated_tool_calls: int = 3,
     loop_similarity_threshold: int = 3,
+    extensions: list[LoopExtension] | None = None,
   ):
     self.error_policy = error_policy or ErrorPolicy()
     self.output_mode = output_mode
@@ -87,6 +90,7 @@ class ReActAgent:
     # Loop detection configuration
     self.max_repeated_tool_calls = max_repeated_tool_calls
     self.loop_similarity_threshold = loop_similarity_threshold
+    self.extensions = list(extensions or [])
 
   async def run(
     self,
@@ -107,12 +111,21 @@ class ReActAgent:
       if self.max_concurrency is not None
       else session.agent.max_concurrency
     )
-    sem = asyncio.Semaphore(max_concurrency)
-
+    extension_manager = LoopExtensionManager([
+      *list(getattr(session.agent, "extensions", [])), *self.extensions,
+    ])
     try:
       for turn in range(session.agent.max_turns):
         session.check_cancelled()
         session.turn_count = turn + 1
+
+        start_decision = await extension_manager.before_turn(LoopExtensionContext(
+          session=session, runner=runner, prompt=prompt, turn=turn + 1,
+        ))
+        if start_decision.failure:
+          return await self._extension_failure(session, runner, start_decision.failure)
+        if start_decision.feedback and session.memory is not None:
+          await session.memory.add(start_decision.feedback, MemoryRole.SYSTEM)
 
         # Build messages from memory (or directly from prompt if no memory)
         if session.memory is not None:
@@ -135,6 +148,12 @@ class ReActAgent:
 
         # --- LLM call ------------------------------------------------
         hook_ctx = HookContext(session=session, runner=runner)
+        session.trace.record_turn_request(
+          turn + 1,
+          [message.model_dump(exclude_none=True) for message in messages],
+          tools=tools, temperature=session.agent.temperature,
+          max_tokens=session.agent.max_tokens,
+        )
         await runner.hooks.emit_llm_request(hook_ctx, messages, tools)
         try:
           response = await runner.llm.chat(
@@ -155,6 +174,8 @@ class ReActAgent:
           )
           raise TransientError(f"LLM call failed: {exc}") from exc
 
+        session.trace.record_turn_response(turn + 1, response.model_dump())
+
         _logger.info(
           "llm.response",
           session_id=session.session_id,
@@ -166,8 +187,21 @@ class ReActAgent:
         if not response.tool_calls:
           content = response.content or ""
 
+          final_decision = await extension_manager.before_final_answer(LoopExtensionContext(
+            session=session, runner=runner, prompt=prompt, turn=turn + 1, content=content,
+          ))
+          content = final_decision.replacement_content or content
+          if final_decision.failure:
+            return await self._extension_failure(session, runner, final_decision.failure)
+
           if session.memory is not None:
             await session.memory.add(content, MemoryRole.ASSISTANT)
+
+          if final_decision.continue_loop:
+            if session.memory is not None and final_decision.feedback:
+              await session.memory.add(final_decision.feedback, MemoryRole.SYSTEM)
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            continue
 
           # result_type parsing
           parsed_data: Any = content
@@ -201,15 +235,9 @@ class ReActAgent:
             f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
           )
 
-        # Execute tool calls with bounded concurrency
-        async def _execute_limited(tc: dict[str, Any]) -> Any:
-          async with sem:
-            return await self._execute_tool_call(session, runner, tc)
-
-        tool_results = await asyncio.gather(*[
-          _execute_limited(tc)
-          for tc in response.tool_calls
-        ], return_exceptions=True)
+        tool_results = await self._execute_tool_calls(
+          session, runner, response.tool_calls, max_concurrency,
+        )
 
         # Check for fatal errors (HALT / FAIL) before adding to memory.
         # asyncio.gather(return_exceptions=True) swallows exceptions; we must
@@ -268,7 +296,7 @@ class ReActAgent:
               if suggested:
                 tool_guidance.append(f"[Tool guidance] {suggested}")
 
-              if tr.get("has_more") is False:
+              if tr.get("has_more") is False and self._is_pagination_tool(session, func_name):
                 has_more_notices.append(
                   f"[System notice] {func_name or 'the tool'} returned 'has_more': false — "
                   "there is no additional data available."
@@ -277,6 +305,15 @@ class ReActAgent:
         if session.memory is not None:
           for notice in has_more_notices + tool_guidance:
             await session.memory.add(notice, MemoryRole.SYSTEM)
+
+        batch_decision = await extension_manager.after_tool_batch(LoopExtensionContext(
+          session=session, runner=runner, prompt=prompt, turn=turn + 1,
+          tool_calls=response.tool_calls, tool_results=tool_results,
+        ))
+        if batch_decision.failure:
+          return await self._extension_failure(session, runner, batch_decision.failure)
+        if batch_decision.feedback and session.memory is not None:
+          await session.memory.add(batch_decision.feedback, MemoryRole.SYSTEM)
 
         # --- Loop detection --------------------------------------------
         should_terminate = await self._detect_and_break_loops(
@@ -548,12 +585,27 @@ class ReActAgent:
       if self.max_concurrency is not None
       else session.agent.max_concurrency
     )
-    sem = asyncio.Semaphore(max_concurrency)
-
+    extension_manager = LoopExtensionManager([
+      *list(getattr(session.agent, "extensions", [])), *self.extensions,
+    ])
     try:
       for turn in range(session.agent.max_turns):
         session.check_cancelled()
         session.turn_count = turn + 1
+
+        start_decision = await extension_manager.before_turn(LoopExtensionContext(
+          session=session, runner=runner, prompt=prompt, turn=turn + 1,
+        ))
+        if start_decision.failure:
+          session.status = SessionStatus.FAILED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          yield StreamEvent(type="error", data={
+            "success": False, "error": start_decision.failure, "error_type": "extension_rejected",
+          })
+          return
+        if start_decision.feedback and session.memory is not None:
+          await session.memory.add(start_decision.feedback, MemoryRole.SYSTEM)
 
         # Build messages from memory (or directly from prompt if no memory)
         if session.memory is not None:
@@ -579,6 +631,12 @@ class ReActAgent:
 
         # Hook: llm request (streaming)
         hook_ctx = HookContext(session=session, runner=runner)
+        session.trace.record_turn_request(
+          turn + 1,
+          [message.model_dump(exclude_none=True) for message in messages],
+          tools=tools, temperature=session.agent.temperature,
+          max_tokens=session.agent.max_tokens,
+        )
         await runner.hooks.emit_llm_request(hook_ctx, messages, tools)
 
         try:
@@ -618,6 +676,7 @@ class ReActAgent:
           content=accumulated_content or None,
           tool_calls=tool_calls or None,
         )
+        session.trace.record_turn_response(turn + 1, response.model_dump())
 
         # Hook: llm response (streaming)
         await runner.hooks.emit_llm_response(hook_ctx, response)
@@ -633,8 +692,27 @@ class ReActAgent:
         if not response.tool_calls:
           content = response.content or ""
 
+          final_decision = await extension_manager.before_final_answer(LoopExtensionContext(
+            session=session, runner=runner, prompt=prompt, turn=turn + 1, content=content,
+          ))
+          content = final_decision.replacement_content or content
+          if final_decision.failure:
+            session.status = SessionStatus.FAILED
+            session.end_time = __import__("datetime").datetime.now()
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            yield StreamEvent(type="error", data={
+              "success": False, "error": final_decision.failure, "error_type": "extension_rejected",
+            })
+            return
+
           if session.memory is not None:
             await session.memory.add(content, MemoryRole.ASSISTANT)
+
+          if final_decision.continue_loop:
+            if session.memory is not None and final_decision.feedback:
+              await session.memory.add(final_decision.feedback, MemoryRole.SYSTEM)
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            continue
 
           parsed_data: Any = content
           if session.agent.result_type is not None:
@@ -697,15 +775,9 @@ class ReActAgent:
             f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
           )
 
-        async def _execute_limited(tc: dict[str, Any]) -> tuple[dict[str, Any], Any]:
-          async with sem:
-            result = await self._execute_tool_call(session, runner, tc)
-            return tc, result
-
-        tool_results = await asyncio.gather(*[
-          _execute_limited(tc)
-          for tc in response.tool_calls
-        ], return_exceptions=True)
+        tool_results = await self._execute_tool_calls(
+          session, runner, response.tool_calls, max_concurrency,
+        )
 
         # Check for fatal errors (HALT / FAIL) before streaming results.
         # Only SafetyError (HALT) and ToolFatalError (FAIL) terminate;
@@ -789,8 +861,8 @@ class ReActAgent:
 
         last_tool_result: Any = None
         for tr in reversed(tool_results):
-          if isinstance(tr, tuple) and not isinstance(tr[1], Exception):
-            last_tool_result = tr[1]
+          if not isinstance(tr, Exception):
+            last_tool_result = tr
             break
         session._last_tool_result = last_tool_result  # type: ignore[attr-defined]
 
@@ -820,7 +892,7 @@ class ReActAgent:
               )
             continue
 
-          tr = item[1]
+          tr = item
           obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
 
           yield StreamEvent(
@@ -848,22 +920,37 @@ class ReActAgent:
         if session.memory is not None:
           stream_guidance: list[str] = []
           stream_notices: list[str] = []
-          for item in tool_results:
+          for tc, item in zip(response.tool_calls, tool_results):
             if isinstance(item, Exception):
               continue
-            tc, tr = item
+            tr = item
             if isinstance(tr, dict):
               suggested = tr.get("suggested_next_step")
               if suggested:
                 stream_guidance.append(f"[Tool guidance] {suggested}")
-              if tr.get("has_more") is False:
-                func_name = tc.get("function", {}).get("name", "the tool")
+              func_name = tc.get("function", {}).get("name", "the tool")
+              if tr.get("has_more") is False and self._is_pagination_tool(session, func_name):
                 stream_notices.append(
                   f"[System notice] {func_name} returned 'has_more': false — "
                   "there is no additional data available."
                 )
           for notice in stream_notices + stream_guidance:
             await session.memory.add(notice, MemoryRole.SYSTEM)
+
+        batch_decision = await extension_manager.after_tool_batch(LoopExtensionContext(
+          session=session, runner=runner, prompt=prompt, turn=turn + 1,
+          tool_calls=response.tool_calls, tool_results=tool_results,
+        ))
+        if batch_decision.failure:
+          session.status = SessionStatus.FAILED
+          session.end_time = __import__("datetime").datetime.now()
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          yield StreamEvent(type="error", data={
+            "success": False, "error": batch_decision.failure, "error_type": "extension_rejected",
+          })
+          return
+        if batch_decision.feedback and session.memory is not None:
+          await session.memory.add(batch_decision.feedback, MemoryRole.SYSTEM)
 
         # --- Loop detection (streaming) --------------------------------
         should_terminate = await self._detect_and_break_loops(
@@ -1036,6 +1123,28 @@ class ReActAgent:
 
     return messages
 
+  def _capability_for_call(self, session: Session, tool_call: dict[str, Any]) -> Any | None:
+    name = tool_call.get("function", {}).get("name", "")
+    return next((tool for tool in session.agent.tools if tool.name == name), None)
+
+  def _is_pagination_tool(self, session: Session, tool_name: str) -> bool:
+    capability = next((tool for tool in session.agent.tools if tool.name == tool_name), None)
+    return execution_for(capability).pagination
+
+  async def _execute_tool_calls(
+    self,
+    session: Session,
+    runner: Any,
+    tool_calls: list[dict[str, Any]],
+    max_concurrency: int,
+  ) -> list[Any]:
+    coordinator = ToolExecutionCoordinator(max_concurrency)
+    return await coordinator.execute(
+      tool_calls,
+      lambda call: self._capability_for_call(session, call),
+      lambda call: self._execute_tool_call(session, runner, call),
+    )
+
   async def _execute_tool_call(
     self,
     session: Session,
@@ -1057,6 +1166,11 @@ class ReActAgent:
     if not capability:
       raise ValueError(f"Tool '{name}' not found in agent.")
 
+    trace_index = session.trace.record_tool_start(
+      str(tool_call.get("id") or tool_call.get("tool_call_id") or "unknown"),
+      name, arguments, execution_for(capability),
+    )
+
     ctx = RunContext(session)
     session.step_count += 1
 
@@ -1076,11 +1190,13 @@ class ReActAgent:
 
     # External tools are executed by the host (e.g. OpenCode), not by nonoka.
     if getattr(capability, "external", False):
-      raise ExternalToolExecutionRequiredError(
+      exc = ExternalToolExecutionRequiredError(
         tool_call_id=tool_call.get("id") or tool_call.get("tool_call_id", "unknown"),
         tool_name=name,
         arguments=arguments,
       )
+      session.trace.record_tool_end(trace_index, error=exc)
+      raise exc
 
     result: Any = None
     error: Exception | None = None
@@ -1117,6 +1233,7 @@ class ReActAgent:
 
     # Hook: tool end
     await runner.hooks.emit_tool_end(hook_ctx, name, arguments, result, error)
+    session.trace.record_tool_end(trace_index, result=result, error=error)
 
     ctx.emit(AgentEvent(
       type=EventType.TOOL_COMPLETED,
@@ -1169,6 +1286,15 @@ class ReActAgent:
 
     # Default: "content" — return the parsed LLM text reply
     return parsed_content
+
+  async def _extension_failure(self, session: Session, runner: Any, error: str) -> RunResult:
+    """Finish a run rejected by a bounded loop extension."""
+    session.status = SessionStatus.FAILED
+    session.end_time = __import__("datetime").datetime.now()
+    await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+    return RunResult(
+      success=False, session=session, error=error, error_type="extension_rejected",
+    )
 
   # ------------------------------------------------------------------ #
   # Loop detection
@@ -1227,6 +1353,9 @@ class ReActAgent:
     session._tool_result_history.extend(tool_results)  # type: ignore[attr-defined]
     history: list[tuple[str, str]] = session._tool_call_history  # type: ignore[attr-defined]
     result_history: list[Any] = session._tool_result_history  # type: ignore[attr-defined]
+    tool_name = history[-1][0] if history else "unknown"
+    capability = next((tool for tool in session.agent.tools if tool.name == tool_name), None)
+    execution = execution_for(capability)
 
     # -- Heuristic helpers ------------------------------------------------
     def _has_more_true(idx: int) -> bool:
@@ -1258,6 +1387,9 @@ class ReActAgent:
         return True
       return False
 
+    if execution.pagination and _has_more_true(len(result_history) - 1):
+      return False
+
     # -- Heuristic 1: consecutive same tool (with has_more awareness) -----
     consecutive_count = 1
     for i in range(len(history) - 2, -1, -1):
@@ -1274,7 +1406,7 @@ class ReActAgent:
           break
         # If the *previous* call's result said has_more=True, this call is
         # likely a legitimate pagination request — count it at half weight.
-        if _has_more_true(prev_idx):
+        if execution.pagination and _has_more_true(prev_idx):
           consecutive_count += 0.5
         else:
           consecutive_count += 1
@@ -1286,7 +1418,7 @@ class ReActAgent:
     if history and _has_more_false(len(result_history) - 1):
       h1_threshold = max(2, h1_threshold - 1)
 
-    h1_triggered = consecutive_count >= h1_threshold
+    h1_triggered = (not execution.is_stateful) and consecutive_count >= h1_threshold
 
     # -- Heuristic 2: repeated (name, args) pair --------------------------
     recent = history[-10:]
@@ -1295,21 +1427,32 @@ class ReActAgent:
       repeat_counts[sig] = repeat_counts.get(sig, 0) + 1
     max_repeat = max(repeat_counts.values()) if repeat_counts else 0
     h2_triggered = max_repeat >= self.loop_similarity_threshold
+    if execution.is_stateful:
+      last_sig = history[-1] if history else ("", "")
+      last_result = result_history[-1] if result_history else None
+      same_outcome = sum(
+        1 for index, sig in enumerate(history)
+        if sig == last_sig
+        and index < len(result_history)
+        and _results_similar(result_history[index], last_result)
+        and not (isinstance(result_history[index], dict) and result_history[index].get("progress") is True)
+      )
+      h2_triggered = same_outcome >= self.loop_similarity_threshold
 
     # -- Heuristic 3: short-cycle detection (A→B→A→B, A→B→C→A→B→C) -----
     h3_triggered = False
-    if len(history) >= 4:
+    if not execution.is_stateful and len(history) >= 4:
       names = [s[0] for s in history[-4:]]
       if names[0] == names[2] and names[1] == names[3] and names[0] != names[1]:
         h3_triggered = True
-    if len(history) >= 6 and not h3_triggered:
+    if not execution.is_stateful and len(history) >= 6 and not h3_triggered:
       names = [s[0] for s in history[-6:]]
       if names[:3] == names[3:]:
         h3_triggered = True
 
     # -- Heuristic 4: result similarity -----------------------------------
     h4_triggered = False
-    if len(result_history) >= 3 and len(history) >= 3:
+    if not execution.is_stateful and len(result_history) >= 3 and len(history) >= 3:
       last_tool = history[-1][0]
       # Only consider the most recent *consecutive* calls to the same tool.
       # A different tool in between resets the window, which matches user
@@ -1342,7 +1485,6 @@ class ReActAgent:
     session._loop_trigger_count += 1  # type: ignore[attr-defined]
     trigger_count: int = session._loop_trigger_count  # type: ignore[attr-defined]
 
-    tool_name = history[-1][0] if history else "unknown"
     _logger.warning(
       "react.loop_detected",
       session_id=session.session_id,
@@ -1425,12 +1567,6 @@ class PlanExecutor:
     hook_ctx = HookContext(session=session, runner=runner)
     await runner.hooks.emit_plan_start(hook_ctx)
 
-    sem = asyncio.Semaphore(self.max_concurrency)
-
-    async def execute_limited(step: Step):
-      async with sem:
-        return await self._execute_step(step, session, runner)
-
     try:
       # Use pre-computed layers instead of calling topological_groups() repeatedly
       for layer_step_ids in plan.layers:
@@ -1452,11 +1588,13 @@ class PlanExecutor:
         if not pending_ids:
           continue
 
-        results = await asyncio.gather(*[
-          execute_limited(plan.get_step(sid))
-          for sid in pending_ids
-          if plan.get_step(sid)
-        ], return_exceptions=True)
+        pending_steps = [plan.get_step(sid) for sid in pending_ids if plan.get_step(sid)]
+        coordinator = ToolExecutionCoordinator(self.max_concurrency)
+        results = await coordinator.execute(
+          [{"step": step} for step in pending_steps],
+          lambda item: next((tool for tool in session.agent.tools if tool.name == item["step"].tool), None),
+          lambda item: self._execute_step(item["step"], session, runner),
+        )
 
         # Handle failures
         failures = [r for r in results if isinstance(r, Exception)]
@@ -1767,6 +1905,13 @@ class ReflectiveAgent:
 
       # Evaluate the result
       eval_result = await self.evaluator.evaluate(result)
+      if hasattr(session, "trace"):
+        session.trace.record_verification(
+          iteration=iteration,
+          passed=eval_result.passed,
+          score=eval_result.score,
+          feedback=eval_result.feedback,
+        )
 
       _logger.info(
         "reflective.evaluation",

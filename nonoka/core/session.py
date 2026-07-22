@@ -69,6 +69,7 @@ class SessionState(BaseModel):
   end_time: datetime | None = None
   turn_count: int = 0
   step_count: int = 0
+  trace: dict[str, Any] | None = None
 
 
 class Session:
@@ -100,6 +101,11 @@ class Session:
     # Cancellation support — asyncio.Event allows cooperative cancellation
     # and is safe to check across async boundaries.
     self._cancel_event = asyncio.Event()
+    from nonoka.core.trace import ExecutionTrace
+    self.trace = ExecutionTrace()
+    self.trace.record_generation(
+      model=agent.model, temperature=agent.temperature, max_tokens=agent.max_tokens,
+    )
 
   # ------------------------------------------------------------------ #
   # Cancellation API
@@ -148,6 +154,7 @@ class Session:
       end_time=self.end_time,
       turn_count=self.turn_count,
       step_count=self.step_count,
+      trace=self.trace.to_dict(),
     )
 
   @classmethod
@@ -174,6 +181,9 @@ class Session:
     session.end_time = state.end_time
     session.turn_count = state.turn_count
     session.step_count = state.step_count
+    if state.trace is not None:
+      from nonoka.core.trace import ExecutionTrace
+      session.trace = ExecutionTrace.from_dict(state.trace)
 
     # Restore memory entries if memory is provided and state has a snapshot
     if memory is not None and state.memory_entries:

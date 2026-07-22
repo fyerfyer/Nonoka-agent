@@ -36,11 +36,13 @@ class EvalResult(BaseModel):
   sample_id: str
   success: bool
   runner_type: str = "agent"
+  strategy: str = "tool_assisted"
   output: str = ""
   candidate_code: str | None = None
   error: str | None = None
   verifier_message: str = ""
   tool_trace: list[str] = Field(default_factory=list)
+  trace: dict[str, Any] | None = None
   metrics: Metrics = Field(default_factory=Metrics)
 
 

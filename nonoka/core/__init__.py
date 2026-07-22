@@ -4,6 +4,9 @@ from .agent import Agent
 from .agent_tool import AgentTool, MemoryStrategy
 from .tool import tool
 from .types import Capability, RetryPolicy, RunResult
+from .execution import ToolExecution, ToolExecutionCoordinator
+from .trace import ExecutionTrace
+from .extensions import LoopExtension, LoopExtensionContext, ExtensionDecision
 from .registry import ToolRegistry
 from .context import RunContext
 from .plan import Plan, Step, PlanBuilder, ref
@@ -53,6 +56,12 @@ __all__ = [
   "Capability",
   "RetryPolicy",
   "RunResult",
+  "ToolExecution",
+  "ToolExecutionCoordinator",
+  "ExecutionTrace",
+  "LoopExtension",
+  "LoopExtensionContext",
+  "ExtensionDecision",
   "ToolRegistry",
   "RunContext",
   "Plan",

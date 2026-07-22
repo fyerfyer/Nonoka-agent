@@ -7,6 +7,9 @@ from nonoka.core.agent_tool import AgentTool, MemoryStrategy
 from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
 from nonoka.core.types import RunResult, RetryPolicy
+from nonoka.core.execution import ToolExecution, ToolExecutionCoordinator
+from nonoka.core.trace import ExecutionTrace
+from nonoka.core.extensions import LoopExtension, LoopExtensionContext, ExtensionDecision
 from nonoka.core.plan import Plan, Step, PlanBuilder, ref
 from nonoka.core.hooks import Hooks, HookContext
 from nonoka.core.errors import (
@@ -64,6 +67,12 @@ __all__ = [
   "RunContext",
   "RunResult",
   "RetryPolicy",
+  "ToolExecution",
+  "ToolExecutionCoordinator",
+  "ExecutionTrace",
+  "LoopExtension",
+  "LoopExtensionContext",
+  "ExtensionDecision",
   "Plan",
   "Step",
   "PlanBuilder",

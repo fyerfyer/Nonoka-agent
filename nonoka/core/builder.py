@@ -59,6 +59,7 @@ class AgentBuilder:
     self._max_concurrency: int | None = None
     self._default_retry: RetryPolicy | None = None
     self._default_timeout: float | None = None
+    self._extensions: list[Any] = []
     self._metadata: dict[str, Any] | None = None
     self._tags: list[str] | None = None
     self._deps_type: type | None = None
@@ -195,6 +196,16 @@ class AgentBuilder:
     self._default_timeout = value
     return self
 
+  def extension(self, extension: Any) -> AgentBuilder:
+    """Add a bounded ReAct lifecycle extension to the built Agent."""
+    self._extensions.append(extension)
+    return self
+
+  def extensions(self, *extensions: Any) -> AgentBuilder:
+    """Add multiple bounded ReAct lifecycle extensions."""
+    self._extensions.extend(extensions)
+    return self
+
   # -- Metadata --------------------------------------------------------------
 
   def metadata(self, **kwargs: Any) -> AgentBuilder:
@@ -236,6 +247,7 @@ class AgentBuilder:
       "model": self._model,
       "tools": tools,
       "system_prompt": self._system_prompt,
+      "extensions": list(self._extensions),
     }
     if self._max_turns is not None:
       kwargs["max_turns"] = self._max_turns

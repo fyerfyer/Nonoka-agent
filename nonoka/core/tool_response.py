@@ -51,6 +51,7 @@ class ToolResponse:
   prev_cursor: str | None = None
   total_count: int | None = None
   suggested_next_step: str | None = None
+  progress: bool | None = None
   metadata: dict[str, Any] = field(default_factory=dict)
 
   def to_dict(self) -> dict[str, Any]:
@@ -67,6 +68,8 @@ class ToolResponse:
       result["total_count"] = self.total_count
     if self.suggested_next_step is not None:
       result["suggested_next_step"] = self.suggested_next_step
+    if self.progress is not None:
+      result["progress"] = self.progress
     if self.metadata:
       result["metadata"] = self.metadata
     return result
@@ -83,6 +86,7 @@ def make_tool_response(
   next_cursor: str | None = None,
   total_count: int | None = None,
   suggested_next_step: str | None = None,
+  progress: bool | None = None,
   **metadata: Any,
 ) -> ToolResponse:
   """Create a ``ToolResponse`` with common fields."""
@@ -92,6 +96,7 @@ def make_tool_response(
     next_cursor=next_cursor,
     total_count=total_count,
     suggested_next_step=suggested_next_step,
+    progress=progress,
     metadata=metadata,
   )
 

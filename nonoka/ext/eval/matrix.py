@@ -57,6 +57,11 @@ def build_manifest(model: str, temperature: float, max_turns: int, timeout: floa
         "note": "Generate all candidates, then run the official HumanEval+ verifier without base-test fallback.",
       },
       {
+        "id": "evalplus-mbpp", "runner": "official-external", "benchmark": "evalplus",
+        "dataset": "mbpp", "limit": None,
+        "note": "Generate all candidates, then run the official MBPP+ verifier without base-test fallback.",
+      },
+      {
         "id": "tau3-retail", "runner": "official-external", "benchmark": "tau2-bench",
         "domain": "retail", "limit": None,
       },
@@ -94,10 +99,12 @@ async def run_manifest(
       continue
     try:
       if job["runner"] == "framework":
-        samples = get_registry().load(job["dataset"], job.get("limit"), job.get("offset", 0))
+        samples = _select_framework_samples(get_registry().load(job["dataset"], None), job)
         runner = HeadlessEvalRunner(
           policy["model"], max_turns=policy["max_turns"],
           timeout_seconds=policy["timeout_seconds"], temperature=policy["temperature"],
+          strategy=job.get("strategy", "tool_assisted"),
+          max_verifier_iterations=int(job.get("max_verifier_iterations", 2)),
         )
         results = await runner.evaluate_many(samples)
         baseline = await runner.evaluate_many(samples, baseline=True) if job.get("baseline") else []
@@ -109,14 +116,20 @@ async def run_manifest(
         run.write(artifact)
         records.append({"id": job_id, "status": "completed", "artifact": str(artifact), "summary": run.summary()})
       elif job["benchmark"] == "evalplus":
+        if job.get("task_ids") is not None or job.get("limit") is not None or int(job.get("offset", 0)):
+          raise RuntimeError(
+            "Official EvalPlus verification requires one completion for every benchmark task; "
+            "use a framework job with task_ids for a bounded diagnostic slice."
+          )
         task_file = output_dir / f"{job_id}-tasks.jsonl"
         export_evalplus_tasks(job["dataset"], task_file)
+        task_rows = _read_jsonl(task_file)
         samples = [
           EvalSample(
             id=row["task_id"], dataset=job_id, prompt=row["prompt"], kind="code",
             metadata={"skip_local_verifier": True, "entry_point": row.get("entry_point"), "source": "EvalPlus"},
           )
-          for row in _read_jsonl(task_file)
+          for row in task_rows
         ]
         runner = HeadlessEvalRunner(
           policy["model"], max_turns=policy["max_turns"],
@@ -169,6 +182,20 @@ def _git_revision() -> str:
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
   return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _select_framework_samples(samples: list[EvalSample], job: dict[str, Any]) -> list[EvalSample]:
+  """Apply reproducible bounded selection for framework-owned checkers."""
+  task_ids = job.get("task_ids")
+  if task_ids is not None:
+    samples_by_id = {sample.id: sample for sample in samples}
+    missing = [str(task_id) for task_id in task_ids if str(task_id) not in samples_by_id]
+    if missing:
+      raise RuntimeError(f"Unknown framework task IDs for {job['id']!r}: {', '.join(missing)}")
+    return [samples_by_id[str(task_id)] for task_id in task_ids]
+  offset = int(job.get("offset", 0))
+  limit = job.get("limit")
+  return samples[offset:] if limit is None else samples[offset:offset + int(limit)]
 
 
 def _write_evalplus_candidates(path: Path, results: list[Any]) -> None:

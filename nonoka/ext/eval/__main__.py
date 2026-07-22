@@ -45,7 +45,7 @@ async def _run(args: argparse.Namespace) -> EvalRun:
     raise RuntimeError("Dataset is empty")
   runner = HeadlessEvalRunner(
     args.model, max_turns=args.max_turns, timeout_seconds=args.timeout,
-    temperature=args.temperature,
+    temperature=args.temperature, strategy=args.strategy,
   )
   results = await runner.evaluate_many(samples)
   baseline = await runner.evaluate_many(samples, baseline=True) if args.baseline else []
@@ -57,6 +57,7 @@ async def _run(args: argparse.Namespace) -> EvalRun:
       "max_turns": args.max_turns,
       "temperature": args.temperature,
       "baseline": args.baseline,
+      "strategy": args.strategy,
     },
   )
 
@@ -175,6 +176,10 @@ def _build_parser() -> argparse.ArgumentParser:
   run_parser.add_argument("--max-turns", type=int, default=8)
   run_parser.add_argument("--timeout", type=float, default=90.0)
   run_parser.add_argument("--temperature", type=float, default=0.0)
+  run_parser.add_argument(
+    "--strategy", choices=["direct", "tool_assisted", "verified_repair"],
+    default="tool_assisted", help="Explicit execution strategy for the agent arm.",
+  )
   run_parser.add_argument("--no-baseline", dest="baseline", action="store_false", help="Skip direct paired baseline")
   run_parser.set_defaults(baseline=True)
   run_parser.add_argument("--output")
