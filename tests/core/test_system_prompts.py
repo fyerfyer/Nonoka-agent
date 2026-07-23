@@ -27,6 +27,14 @@ def test_coding_emphasizes_structure():
   assert "type hint" in prompt.lower() or "docstring" in prompt.lower()
 
 
+def test_coding_requires_evidence_preservation_and_acceptance_checks():
+  """CODING should preserve fragile inputs and verify observable outcomes."""
+  prompt = SystemPromptTemplate.CODING.lower()
+  assert "volatile evidence" in prompt
+  assert "acceptance checklist" in prompt
+  assert "materially different fallback" in prompt
+
+
 def test_exploration_with_extra_context():
   """exploration() should prepend extra context."""
   extra = "You are an expert researcher."

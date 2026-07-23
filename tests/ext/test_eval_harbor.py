@@ -86,3 +86,9 @@ def test_terminal_observation_bounds_large_output_and_keeps_exit_status():
 def test_terminal_prompt_requires_exact_user_supplied_replacements():
   assert "byte-for-byte" in _TERMINAL_SYSTEM_PROMPT
   assert "inventing a generic substitute" in _TERMINAL_SYSTEM_PROMPT
+
+
+def test_terminal_prompt_requires_preservation_and_runtime_verification():
+  assert "WAL/journal" in _TERMINAL_SYSTEM_PROMPT
+  assert "health/request check" in _TERMINAL_SYSTEM_PROMPT
+  assert "materially different fallback" in _TERMINAL_SYSTEM_PROMPT

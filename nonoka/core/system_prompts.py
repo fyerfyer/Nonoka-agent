@@ -26,9 +26,6 @@ Or compose with a user prefix::
 
 from __future__ import annotations
 
-from nonoka.core.prompt import PromptTemplate
-
-
 # --------------------------------------------------------------------------- #
 # Raw prompt strings
 # --------------------------------------------------------------------------- #
@@ -74,7 +71,19 @@ Rules:
    logic.
 4. If you use tools (e.g. to read a file or run a test), check the tool
    response for "has_more" or "suggested_next_step" and follow it.
-5. After writing code, briefly verify edge cases and mention any assumptions.
+5. Preserve volatile evidence before inspecting it with tools that may mutate
+   it. Copy databases together with WAL/journal files, logs, crash dumps,
+   archives, and generated artifacts to a safe path first.
+6. Before completing, convert requested files, outputs, and behaviours into an
+   acceptance checklist and run the relevant checks. Start services and make a
+   real health/request check; test numerical or data transformations against
+   their required properties and output files.
+7. Do not blindly repeat an equivalent failing tool call. After one short
+   retry, inspect the failure and choose a materially different fallback or
+   report the blocked dependency.
+8. Bound expensive exploration and validation commands. Prefer a small
+   representative check before a known-slow full baseline.
+9. After writing code, briefly verify edge cases and mention any assumptions.
 """
 
 # --------------------------------------------------------------------------- #
