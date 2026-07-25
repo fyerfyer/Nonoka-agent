@@ -36,6 +36,8 @@ from nonoka.core.extensions import LoopExtension, LoopExtensionContext, LoopExte
 
 _logger = get_logger("nonoka.paradigm")
 
+_TOOL_CALL_PROGRESS_INTERVAL_CHARS = 1024
+
 
 # --------------------------------------------------------------------------- #
 # Actor Protocol — anything that can execute a task in a session
@@ -897,6 +899,7 @@ class ReActAgent:
         # --- Streaming LLM call --------------------------------------
         accumulated_content = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
+        reported_tool_argument_chars: dict[int, int] = {}
 
         # Hook: llm request (streaming)
         hook_ctx = HookContext(session=session, runner=runner)
@@ -938,6 +941,10 @@ class ReActAgent:
                 yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
               if chunk.tool_call_deltas:
                 self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
+                for progress in self._collect_tool_call_progress(
+                  accumulated_tool_calls, reported_tool_argument_chars,
+                ):
+                  yield StreamEvent(type="tool_call_progress", data=progress)
               if chunk.finish_reason:
                 break
           else:
@@ -948,6 +955,10 @@ class ReActAgent:
                   yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
                 if chunk.tool_call_deltas:
                   self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
+                  for progress in self._collect_tool_call_progress(
+                    accumulated_tool_calls, reported_tool_argument_chars,
+                  ):
+                    yield StreamEvent(type="tool_call_progress", data=progress)
                 if chunk.finish_reason:
                   break
         except TimeoutError as exc:
@@ -1454,6 +1465,34 @@ class ReActAgent:
           current_func["name"] += func_delta["name"]
         if func_delta.get("arguments"):
           current_func["arguments"] += func_delta["arguments"]
+
+  @staticmethod
+  def _collect_tool_call_progress(
+    accumulator: dict[int, dict[str, Any]],
+    reported_argument_chars: dict[int, int],
+  ) -> list[dict[str, Any]]:
+    """Return bounded, content-free progress for streaming tool arguments."""
+    progress: list[dict[str, Any]] = []
+    for idx in sorted(accumulator):
+      function = accumulator[idx].get("function", {})
+      argument_chars = len(function.get("arguments", ""))
+      if argument_chars <= 0:
+        continue
+
+      last_reported = reported_argument_chars.get(idx)
+      if (
+        last_reported is not None
+        and argument_chars - last_reported < _TOOL_CALL_PROGRESS_INTERVAL_CHARS
+      ):
+        continue
+
+      reported_argument_chars[idx] = argument_chars
+      progress.append({
+        "tool_call_index": idx,
+        "tool_name": function.get("name", ""),
+        "argument_chars": argument_chars,
+      })
+    return progress
 
   @staticmethod
   def _finalize_tool_calls(

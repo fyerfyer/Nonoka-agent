@@ -487,6 +487,61 @@ async def test_react_agent_run_stream_yields_content_and_final():
   assert events[-1].data["success"] is True
 
 
+@pytest.mark.asyncio
+async def test_react_agent_reports_bounded_content_free_tool_call_progress():
+  """Large streamed tool arguments remain observable without leaking them."""
+  @tool
+  async def write_payload(content: str) -> str:
+    return content
+
+  agent = Agent(model="test", tools=[write_payload], max_turns=2)
+  session = Session(session_id="stream-tool-progress", agent=agent)
+
+  from nonoka.core.hooks import Hooks
+  runner = MagicMock()
+  runner.checkpoint_store = MemoryCheckpointStore()
+  runner.hooks = Hooks()
+
+  secret_fragment = "private-payload-" * 20
+  chunks = [secret_fragment for _ in range(12)]
+  llm_mock = MagicMock()
+
+  async def fake_stream(*args, **kwargs):
+    from nonoka.core.llm import LLMStreamChunk
+    for index, fragment in enumerate(chunks):
+      yield LLMStreamChunk(tool_call_deltas=[{
+        "index": 0,
+        "id": "call-large" if index == 0 else None,
+        "function": {
+          "name": "write_payload" if index == 0 else "",
+          "arguments": fragment,
+        },
+      }])
+    yield LLMStreamChunk(finish_reason="tool_calls")
+
+  llm_mock.chat_stream = fake_stream
+  runner.llm = llm_mock
+
+  events = []
+  react = ReActAgent()
+  async for event in react.run_stream(session, runner, prompt="write it"):
+    events.append(event)
+    if event.type == "tool_call_start":
+      break
+
+  progress = [event for event in events if event.type == "tool_call_progress"]
+  assert 2 <= len(progress) < len(chunks)
+  assert progress[0].data == {
+    "tool_call_index": 0,
+    "tool_name": "write_payload",
+    "argument_chars": len(secret_fragment),
+  }
+  assert [event.data["argument_chars"] for event in progress] == sorted(
+    event.data["argument_chars"] for event in progress
+  )
+  assert "private-payload" not in repr([event.data for event in progress])
+
+
 # --------------------------------------------------------------------------- #
 # Cancellation / Abort
 # --------------------------------------------------------------------------- #

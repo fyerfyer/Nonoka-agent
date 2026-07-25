@@ -618,6 +618,8 @@ class StreamEvent(BaseModel):
 
   Types:
   * ``content_delta`` — incremental LLM text.
+  * ``tool_call_progress`` — content-free progress while the model streams a
+    potentially large tool payload.
   * ``tool_call_start`` — LLM requested one or more tools.
   * ``tool_call_result`` — a tool finished (success or error).
   * ``approval_request`` — a tool call is waiting for human approval.
