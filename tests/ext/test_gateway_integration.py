@@ -12,10 +12,16 @@ from nonoka.core.runner import Runner
 from nonoka.ext.gateway.core import Gateway, GatewayMessage
 
 
+pytestmark = pytest.mark.live
+
+
 load_dotenv()
 
 API_KEY = os.getenv("OPENAI_API_KEY")
 BASE_URL = os.getenv("OPENAI_BASE_URL")
+MODEL_NAME = os.getenv("NONOKA_TEST_MODEL", "deepseek-v4-pro")
+if BASE_URL:
+  MODEL_NAME = f"openai/{MODEL_NAME}"
 
 
 class FakeTelegramAdapter:
@@ -55,19 +61,15 @@ def real_llm_runner():
   if not API_KEY:
     pytest.skip("No OPENAI_API_KEY found in environment.")
 
-  model_name = "deepseek-chat"
-  if BASE_URL:
-    model_name = f"openai/{model_name}"
-
   runner = Runner()
   # Pre-populate the LLM cache with a real provider
   from nonoka.core.llm import LiteLLMProvider
   provider = LiteLLMProvider(
-    model=model_name,
+    model=MODEL_NAME,
     api_key=API_KEY,
     base_url=BASE_URL,
   )
-  runner._llm_cache[model_name] = provider
+  runner._llm_cache[MODEL_NAME] = provider
   runner.llm = provider
   return runner
 
@@ -86,7 +88,7 @@ async def test_gateway_e2e_with_real_llm(real_llm_runner):
   await gateway.start()
 
   agent = Agent(
-    model="openai/deepseek-chat",
+    model=MODEL_NAME,
     tools=[],
     system_prompt="You are a helpful assistant. Be very concise.",
     max_turns=3,
@@ -123,7 +125,7 @@ async def test_gateway_e2e_with_tool_and_real_llm(real_llm_runner):
     return {"city": city, "temperature": 25, "condition": "sunny"}
 
   agent = Agent(
-    model="openai/deepseek-chat",
+    model=MODEL_NAME,
     tools=[get_weather],
     system_prompt="You are a weather assistant. Use the get_weather tool when asked about weather.",
     max_turns=3,
@@ -167,7 +169,7 @@ async def test_gateway_reverse_channel_with_real_llm(real_llm_runner):
     return "No gateway available"
 
   agent = Agent(
-    model="openai/deepseek-chat",
+    model=MODEL_NAME,
     tools=[notify_admin],
     system_prompt=(
       "You are an alert bot. When the user asks you to notify or alert someone, "
@@ -202,7 +204,7 @@ async def test_gateway_session_persistence(real_llm_runner):
   await gateway.start()
 
   agent = Agent(
-    model="openai/deepseek-chat",
+    model=MODEL_NAME,
     tools=[],
     system_prompt="You are a helpful assistant. Remember what the user told you.",
     max_turns=3,

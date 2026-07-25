@@ -25,10 +25,12 @@ from nonoka.ext.eval.external import (
 from nonoka.ext.eval.models import EvalRun, EvalSample
 from nonoka.ext.eval.runners.headless import HeadlessEvalRunner
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
-def build_manifest(model: str, temperature: float, max_turns: int, timeout: float) -> dict[str, Any]:
+def build_manifest(
+  model: str, temperature: float, max_turns: int | None, timeout: float,
+) -> dict[str, Any]:
   """Build the full release matrix without starting any model requests."""
   return {
     "schema_version": SCHEMA_VERSION,
@@ -39,7 +41,7 @@ def build_manifest(model: str, temperature: float, max_turns: int, timeout: floa
       "model": model,
       "temperature": temperature,
       "max_turns": max_turns,
-      "timeout_seconds": timeout,
+      "sample_timeout_seconds": timeout,
       "trials": 1,
     },
     "gates": {
@@ -47,7 +49,7 @@ def build_manifest(model: str, temperature: float, max_turns: int, timeout: floa
         "Run core and eval adapter regression tests before spending model or Docker resources."
       ),
       "external": (
-        "Run `nonoka eval doctor`; only then launch isolated official benchmark harnesses."
+        "Run `python -m nonoka.ext.eval doctor`; only then launch isolated official benchmark harnesses."
       ),
     },
     "jobs": [
@@ -72,10 +74,12 @@ def build_manifest(model: str, temperature: float, max_turns: int, timeout: floa
       {
         "id": "tau3-retail", "runner": "official-external", "benchmark": "tau2-bench",
         "domain": "retail", "limit": None,
+        "harness_max_steps": 24,
       },
       {
         "id": "tau3-airline", "runner": "official-external", "benchmark": "tau2-bench",
         "domain": "airline", "limit": None,
+        "harness_max_steps": 24,
       },
       {
         "id": "terminal-bench", "runner": "official-external", "benchmark": "terminal-bench",
@@ -100,6 +104,8 @@ async def run_manifest(
   """
   output_dir.mkdir(parents=True, exist_ok=True)
   policy = manifest["policy"]
+  sample_timeout_seconds = _sample_timeout_seconds(policy)
+  started_at = datetime.now(timezone.utc).isoformat()
   records: list[dict[str, Any]] = []
   for job in manifest["jobs"]:
     job_id = str(job["id"])
@@ -111,9 +117,9 @@ async def run_manifest(
         samples = _select_framework_samples(get_registry().load(job["dataset"], None), job)
         runner = HeadlessEvalRunner(
           policy["model"], max_turns=policy["max_turns"],
-          timeout_seconds=policy["timeout_seconds"], temperature=policy["temperature"],
+          timeout_seconds=sample_timeout_seconds, temperature=policy["temperature"],
           strategy=job.get("strategy", "auto"),
-          max_verifier_iterations=int(job.get("max_verifier_iterations", 2)),
+          max_verifier_iterations=job.get("max_verifier_iterations"),
         )
         results = await runner.evaluate_many(samples)
         baseline = await runner.evaluate_many(samples, baseline=True) if job.get("baseline") else []
@@ -142,7 +148,7 @@ async def run_manifest(
         ]
         runner = HeadlessEvalRunner(
           policy["model"], max_turns=policy["max_turns"],
-          timeout_seconds=policy["timeout_seconds"], temperature=policy["temperature"],
+          timeout_seconds=sample_timeout_seconds, temperature=policy["temperature"],
         )
         generated = await runner.evaluate_many(samples)
         candidates = output_dir / f"{job_id}-candidates.jsonl"
@@ -155,15 +161,16 @@ async def run_manifest(
       elif job["benchmark"] == "tau2-bench":
         artifact_dir = output_dir / job_id
         code = run_tau2_bench(
-          policy["model"], job.get("limit"), job["domain"], policy["max_turns"] * 3,
-          int(policy["timeout_seconds"]), artifact_dir,
+          policy["model"], job.get("limit"), job["domain"],
+          int(job.get("harness_max_steps", 24)),
+          int(sample_timeout_seconds), artifact_dir,
         )
         records.append({"id": job_id, "status": "completed" if code == 0 else "failed", "returncode": code, "artifact": str(artifact_dir)})
       elif job["benchmark"] == "terminal-bench":
         artifact_dir = output_dir / job_id
         code = run_terminal_bench(
           policy["model"], job.get("limit"), output=artifact_dir,
-          test_timeout_seconds=policy["timeout_seconds"] * 3,
+          test_timeout_seconds=sample_timeout_seconds * 3,
         )
         records.append({"id": job_id, "status": "completed" if code == 0 else "failed", "returncode": code, "artifact": str(artifact_dir)})
     except Exception as exc:
@@ -172,11 +179,18 @@ async def run_manifest(
   result = {
     "schema_version": SCHEMA_VERSION,
     "manifest": manifest,
-    "started_at": datetime.now(timezone.utc).isoformat(),
+    "started_at": started_at,
+    "finished_at": datetime.now(timezone.utc).isoformat(),
     "records": records,
   }
   write_manifest(result, output_dir / "matrix-results.json")
   return result
+
+
+def _sample_timeout_seconds(policy: dict[str, Any]) -> float:
+  """Read the v2 field while accepting existing v1 matrix manifests."""
+  value = policy.get("sample_timeout_seconds", policy.get("timeout_seconds", 90.0))
+  return float(value)
 
 
 def _git_revision() -> str:

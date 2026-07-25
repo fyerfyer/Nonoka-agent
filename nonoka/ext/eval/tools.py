@@ -68,7 +68,12 @@ def get_eval_tools() -> list[object]:
 
   @tool(execution=ToolExecution(read_only=True, stateful_action=True))
   def execute_python(ctx: RunContext[EvalDeps], code: str) -> str:
-    """Run a short Python command in the evaluation workspace."""
+    """Run Python against an isolated copy of the evaluation workspace.
+
+    Changes made by this command are discarded. Use write_file or delete_file
+    for persistent workspace mutations; use this tool only to inspect or
+    verify the current files.
+    """
     ctx.deps.tool_trace.append("execute_python")
     # Validation runs against an ephemeral copy.  A model cannot bypass
     # write_file by using Python to alter the actual evaluation workspace.

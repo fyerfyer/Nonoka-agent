@@ -87,7 +87,7 @@ class CodingWorkflow:
   requires_workspace: bool = False
   evaluator: Any | None = None
   strategy: CodeStrategy | None = None
-  max_repairs: int = 2
+  max_repairs: int | None = 2
 
   def resolve_strategy(self) -> CodeStrategy:
     if self.strategy is not None:
@@ -101,7 +101,8 @@ class CodingWorkflow:
 
   def extensions(self) -> list[Any]:
     if self.resolve_strategy() is CodeStrategy.VERIFIED_REPAIR:
-      return [VerifierRepairExtension(self.evaluator, max_repairs=max(0, self.max_repairs))]
+      max_repairs = None if self.max_repairs is None else max(0, self.max_repairs)
+      return [VerifierRepairExtension(self.evaluator, max_repairs=max_repairs)]
     return []
 
   def build_agent(

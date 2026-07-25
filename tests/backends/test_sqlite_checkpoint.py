@@ -12,6 +12,7 @@ from nonoka.core.session import (
   StepStatus,
   StepResult,
 )
+from nonoka.core.runtime import RuntimeLimits, SessionRuntimeState, TerminalReason, Termination
 
 
 # --------------------------------------------------------------------------- #
@@ -69,6 +70,44 @@ async def test_save_and_load_session(memory_store):
   assert loaded.step_statuses == {"step-1": StepStatus.COMPLETED}
   assert loaded.completed_steps["step-1"].data == {"key": "value"}
   assert loaded.turn_count == 5
+
+
+@pytest.mark.asyncio
+async def test_runtime_state_round_trips_through_sqlite(memory_store):
+  runtime = SessionRuntimeState.create(RuntimeLimits(
+    max_model_turns=24, max_tool_calls=64, wall_timeout_seconds=900,
+  ))
+  runtime.usage.model_turns = 7
+  runtime.usage.tool_calls = 19
+  runtime.termination = Termination(
+    reason=TerminalReason.TOOL_BUDGET_EXHAUSTED,
+    message="budget", limit=64, used=64,
+  )
+  state = _make_state(session_id="runtime", runtime_state=runtime)
+
+  await memory_store.save_session(state.session_id, state)
+  loaded = await memory_store.load_session(state.session_id)
+
+  assert loaded.runtime_state.usage.model_turns == 7
+  assert loaded.runtime_state.usage.tool_calls == 19
+  assert loaded.runtime_state.deadline_at == runtime.deadline_at
+  assert loaded.runtime_state.termination.reason == TerminalReason.TOOL_BUDGET_EXHAUSTED
+
+
+@pytest.mark.asyncio
+async def test_extension_state_round_trips_through_sqlite(memory_store):
+  state = _make_state(
+    session_id="extension-state",
+    extension_state={
+      "workspace_progress": {"exploration_turns": 3, "mutating": False}
+    },
+  )
+
+  await memory_store.save_session(state.session_id, state)
+  loaded = await memory_store.load_session(state.session_id)
+
+  assert loaded is not None
+  assert loaded.extension_state == state.extension_state
 
 
 @pytest.mark.asyncio

@@ -169,6 +169,35 @@ async def test_loop_detection_resets_on_different_tool(mock_runner):
   assert len(loop_warnings) == 0, "Different tool should reset consecutive counter"
 
 
+@pytest.mark.asyncio
+async def test_parallel_distinct_reads_do_not_trigger_loop_warning(mock_runner):
+  """The same read tool may inspect several independent files in one turn."""
+
+  @tool(execution=ToolExecution(read_only=True))
+  async def read_file(ctx, path: str) -> str:
+    return path
+
+  agent = Agent(model="test", tools=[read_file], max_turns=2)
+  session = Session(session_id="parallel-reads", agent=agent, deps=None)
+  session.memory = WorkingMemory(session_id="parallel-reads", memory_backend=None)
+  mock_runner.llm.chat = AsyncMock(side_effect=[
+    LLMResponse(content=None, tool_calls=[
+      _tool_call("read_file", {"path": "a.py"}, "tc1"),
+      _tool_call("read_file", {"path": "b.py"}, "tc2"),
+    ]),
+    LLMResponse(content="Done."),
+  ])
+
+  result = await ReActAgent(max_repeated_tool_calls=2).run(
+    session, mock_runner, prompt="Inspect both files",
+  )
+
+  assert result.success is True
+  assert not any(
+    "repeatedly" in entry.content.lower() for entry in session.memory.entries
+  )
+
+
 # --------------------------------------------------------------------------- #
 # Stateful progress-aware regression
 # --------------------------------------------------------------------------- #

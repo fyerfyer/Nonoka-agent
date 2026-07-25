@@ -235,19 +235,20 @@ class Runner:
   ) -> Session:
     sid = session_id or str(uuid.uuid4())
     from nonoka.core.memory import WorkingMemory
+    state = await self.checkpoint_store.load_session(session_id) if session_id is not None else None
+    persisted_limits = getattr(getattr(state, "runtime_state", None), "limits", None)
+    configured_limits = persisted_limits or getattr(agent, "runtime_limits", None)
     memory = WorkingMemory(
       session_id=sid,
       memory_backend=self.memory_backend,
+      max_tokens=(getattr(configured_limits, "max_context_tokens", None) or 8192),
     )
 
-    # If resuming an existing session, restore memory entries from checkpoint
-    if session_id is not None:
-      state = await self.checkpoint_store.load_session(session_id)
-      if state is not None and state.memory_entries:
-        from nonoka.core.memory import MemoryEntry
-        memory.entries = [MemoryEntry(**entry) for entry in state.memory_entries]
-
-    session = Session(session_id=sid, agent=agent, deps=deps, memory=memory)
+    session = (
+      Session.from_state(state, agent, deps=deps, memory=memory)
+      if state is not None
+      else Session(session_id=sid, agent=agent, deps=deps, memory=memory)
+    )
 
     # Bind runner so AgentTool can access it via ctx.session._runner_ref
     object.__setattr__(session, "_runner_ref", weakref.ref(self))
@@ -262,6 +263,18 @@ class Runner:
       await self._inherit_memory(parent_session_id, session)
 
     return session
+
+  async def cancel_session(self, session_id: str) -> bool:
+    """Persist cancellation so a later process cannot resume the session."""
+    state = await self.checkpoint_store.load_session(session_id)
+    if state is None:
+      return False
+    session = Session.from_state(state, agent=Agent(model="cancelled"), memory=None)
+    session.cancel()
+    session.status = SessionStatus.CANCELLED
+    session.end_time = __import__("datetime").datetime.now()
+    await self.checkpoint_store.save_session(session_id, session.to_state())
+    return True
 
   @staticmethod
   def _attach_trace(result: RunResult) -> RunResult:

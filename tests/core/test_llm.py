@@ -198,6 +198,7 @@ async def test_litellm_stream_yields_content_deltas():
 # Integration test with real LLM
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_litellm_provider_real_call():
   """
@@ -213,7 +214,7 @@ async def test_litellm_provider_real_call():
   if not api_key:
     pytest.skip("No OPENAI_API_KEY found in environment, skipping real LLM call.")
 
-  model_name = "deepseek-chat"
+  model_name = os.getenv("NONOKA_TEST_MODEL", "deepseek-v4-pro")
   if base_url:
     model_name = f"openai/{model_name}"
 

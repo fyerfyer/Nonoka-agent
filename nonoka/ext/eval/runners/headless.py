@@ -24,11 +24,11 @@ class HeadlessEvalRunner:
   def __init__(
     self,
     model: str,
-    max_turns: int = 8,
+    max_turns: int | None = None,
     timeout_seconds: float = 90.0,
     temperature: float | None = 0.0,
     strategy: str = "auto",
-    max_verifier_iterations: int = 2,
+    max_verifier_iterations: int | None = None,
     runner_factory: Callable[[UsageHooks], Runner] | None = None,
   ) -> None:
     self.model = model
@@ -38,7 +38,9 @@ class HeadlessEvalRunner:
     if strategy not in {"auto", "direct", "tool_assisted", "verified_repair"}:
       raise ValueError("strategy must be auto, direct, tool_assisted, or verified_repair")
     self.strategy = strategy
-    self.max_verifier_iterations = max(1, max_verifier_iterations)
+    self.max_verifier_iterations = (
+      None if max_verifier_iterations is None else max(1, max_verifier_iterations)
+    )
     self._runner_factory = runner_factory
 
   async def evaluate(self, sample: EvalSample, *, baseline: bool = False) -> EvalResult:
@@ -59,7 +61,7 @@ class HeadlessEvalRunner:
         tools=get_eval_tools(),
         system_prompt=self._system_prompt(sample, strategy == "direct"),
         max_turns=1 if strategy == "direct" else self.max_turns,
-        max_steps=40,
+        max_steps=1 if strategy == "direct" else None,
         temperature=self.temperature,
       )
       runner = self._runner_factory(hooks) if self._runner_factory else Runner(
@@ -135,7 +137,9 @@ class HeadlessEvalRunner:
       )
     return (
       "Complete the task using the provided workspace tools. Inspect files before editing, "
-      "use execute_python to verify your result, and only then report completion."
+      "make every persistent change with write_file or delete_file, then use execute_python "
+      "only to verify the result. execute_python runs in an isolated copy, so any files it "
+      "creates or edits are discarded. Only report completion after verification."
     )
 
   @staticmethod

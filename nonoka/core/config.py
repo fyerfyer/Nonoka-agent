@@ -9,7 +9,7 @@ class NonokaSettings(BaseSettings):
   For example, use NONOKA_DEFAULT_MODEL to override default_model.
   """
   # LLM
-  default_model: str = "deepseek-chat"
+  default_model: str = "deepseek/deepseek-v4-pro"
   openai_api_key: str | None = None
   anthropic_api_key: str | None = None
   openai_base_url: str | None = None 

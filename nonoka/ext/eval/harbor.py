@@ -192,7 +192,7 @@ class NonokaHarborAgent(BaseAgent):
   def __init__(
     self,
     model_name: str | None = None,
-    max_turns: int = 24,
+    max_turns: int | None = None,
     command_timeout_seconds: float = 180.0,
     max_terminal_output_chars: int = _DEFAULT_TERMINAL_OUTPUT_CHARS,
     requires_workspace_mutation: bool = False,
@@ -204,6 +204,10 @@ class NonokaHarborAgent(BaseAgent):
       raise RuntimeError("Nonoka Harbor adapter requires the optional `harbor` package.") from _HARBOR_IMPORT_ERROR
     super().__init__(**kwargs)
     self._model_name = model_name or str(kwargs.get("model") or "")
+    # Harbor owns the task-level agent deadline.  Do not impose a second
+    # implicit turn cap here: long but productive terminal workflows should be
+    # governed by that external deadline unless a benchmark caller opts in to
+    # a concrete limit.
     self._max_turns = max_turns
     self._command_timeout_seconds = command_timeout_seconds
     self._max_terminal_output_chars = max(1_000, max_terminal_output_chars)

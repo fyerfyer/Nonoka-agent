@@ -54,8 +54,8 @@ class AgentBuilder:
     self._skill_manager: Any | None = None
     self._external_mcp_registry: Any | None = None
     self._system_prompt: str = ""
-    self._max_turns: int | None = None
-    self._max_steps: int | None = None
+    self._max_turns: int | None | _Unset = _UNSET
+    self._max_steps: int | None | _Unset = _UNSET
     self._max_concurrency: int | None = None
     self._default_retry: RetryPolicy | None = None
     self._default_timeout: float | None = None
@@ -171,13 +171,13 @@ class AgentBuilder:
 
   # -- Execution policy ------------------------------------------------------
 
-  def max_turns(self, value: int) -> AgentBuilder:
-    """Set the maximum conversation turns."""
+  def max_turns(self, value: int | None) -> AgentBuilder:
+    """Set the conversation-turn budget; ``None`` disables it."""
     self._max_turns = value
     return self
 
-  def max_steps(self, value: int) -> AgentBuilder:
-    """Set the maximum execution steps."""
+  def max_steps(self, value: int | None) -> AgentBuilder:
+    """Set the cumulative tool-call budget; ``None`` disables it."""
     self._max_steps = value
     return self
 
@@ -249,9 +249,9 @@ class AgentBuilder:
       "system_prompt": self._system_prompt,
       "extensions": list(self._extensions),
     }
-    if self._max_turns is not None:
+    if self._max_turns is not _UNSET:
       kwargs["max_turns"] = self._max_turns
-    if self._max_steps is not None:
+    if self._max_steps is not _UNSET:
       kwargs["max_steps"] = self._max_steps
     if self._max_concurrency is not None:
       kwargs["max_concurrency"] = self._max_concurrency

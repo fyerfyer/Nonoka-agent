@@ -83,7 +83,7 @@ class NonokaTerminalBenchAgent(BaseAgent):
   def __init__(
     self,
     model_name: str,
-    max_turns: int = 24,
+    max_turns: int | None = None,
     command_timeout_seconds: float = 180.0,
     temperature: float = 0.0,
     **kwargs: Any,

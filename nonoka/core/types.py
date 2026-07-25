@@ -6,6 +6,7 @@ from typing import Any, Protocol, TypeVar, runtime_checkable, Generic
 
 if TYPE_CHECKING:
   from nonoka.core import RunContext
+  from nonoka.core.runtime import Termination
 
 DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
@@ -29,6 +30,7 @@ class RunResult(Generic[ResultT]):
   error: str | None = None
   error_type: str | None = None  # "llm_error" | "tool_error" | "timeout" | "cancelled" | ...
   trace: dict[str, Any] | None = None
+  termination: "Termination | None" = None
 
 
 @dataclass

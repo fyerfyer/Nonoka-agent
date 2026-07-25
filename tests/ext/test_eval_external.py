@@ -7,6 +7,23 @@ from types import SimpleNamespace
 from nonoka.ext.eval import external
 
 
+def test_harbor_adapter_defers_turn_budget_to_external_runner(monkeypatch):
+  from nonoka.ext.eval import harbor
+
+  class FakeBaseAgent:
+    def __init__(self, **_kwargs):
+      pass
+
+  monkeypatch.setattr(harbor, "_HARBOR_IMPORT_ERROR", None)
+  monkeypatch.setattr(harbor, "BaseAgent", FakeBaseAgent)
+
+  default_agent = harbor.NonokaHarborAgent(model_name="test")
+  bounded_agent = harbor.NonokaHarborAgent(model_name="test", max_turns=7)
+
+  assert default_agent._max_turns is None
+  assert bounded_agent._max_turns == 7
+
+
 def test_tau2_runner_uses_isolated_interpreter_and_keeps_credentials_out_of_argv(
   monkeypatch, tmp_path,
 ):

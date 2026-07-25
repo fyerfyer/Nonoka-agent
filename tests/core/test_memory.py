@@ -3,6 +3,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock
 
 from nonoka.core.memory import WorkingMemory, MemoryRole
+from nonoka.core.runtime import RuntimeLimits
 from nonoka.backends.memory.in_memory import InMemoryBackend
 from nonoka.core.llm import LLMResponse
 
@@ -141,6 +142,35 @@ async def test_working_memory_evicts_a_complete_tool_call_batch():
 
 
 @pytest.mark.asyncio
+async def test_protocol_compactor_keeps_evidence_ledger_and_valid_pairs():
+  memory = WorkingMemory(session_id="ledger", max_tokens=1000, token_counter=len)
+  await memory.add("implement the task", MemoryRole.USER)
+  await memory.add(
+    "", MemoryRole.ASSISTANT, defer_budget=True,
+    tool_calls=[{
+      "id": "call-1",
+      "function": {"name": "bash", "arguments": '{"command":"pytest -q"}'},
+    }],
+  )
+  await memory.add(
+    "x" * 2000, MemoryRole.TOOL, defer_budget=True,
+    tool_call_id="call-1", tool_name="bash", exit_code=1,
+    artifact_ref="trace://bash-call-1.txt",
+  )
+
+  metrics = await memory.enforce_budget(RuntimeLimits(
+    max_context_bytes=1600, max_context_tokens=1000, max_tool_messages=1,
+  ))
+
+  assert metrics is not None
+  assert not [entry for entry in memory.entries if entry.role == MemoryRole.TOOL]
+  ledger = next(entry for entry in memory.entries if entry.metadata.get("evidence_ledger"))
+  assert "pytest -q" in ledger.content
+  assert "trace://bash-call-1.txt" in ledger.content
+  assert "implement the task" in [entry.content for entry in memory.entries]
+
+
+@pytest.mark.asyncio
 async def test_working_memory_summary_strategy():
   """When summary_llm is provided, WorkingMemory auto-summarises old chats."""
   mock_llm = MockLLMProvider()
@@ -182,6 +212,7 @@ async def test_working_memory_rag_integration():
   assert any("blue" in e.content for e in system_entries)
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_working_memory_summary_strategy_real_llm():
   """Test summarisation with a real LLM (requires OPENAI_API_KEY)."""
@@ -196,7 +227,7 @@ async def test_working_memory_summary_strategy_real_llm():
   if not api_key:
     pytest.skip("No OPENAI_API_KEY found, skipping real LLM test for memory.")
 
-  model_name = "deepseek-chat"
+  model_name = os.getenv("NONOKA_TEST_MODEL", "deepseek-v4-pro")
   if base_url:
     model_name = f"openai/{model_name}"
 

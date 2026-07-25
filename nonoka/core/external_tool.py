@@ -8,12 +8,51 @@ tool call; the host executes it and returns the result via the resume path.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 from nonoka.core.context import RunContext
 from nonoka.core.errors import ExternalToolExecutionRequiredError
 from nonoka.core.execution import ToolExecution, UNKNOWN_EXECUTION
 from nonoka.core.types import Capability
+
+
+class ObservationCompleteness(str, Enum):
+  """Host attestation describing whether an observation is exhaustive."""
+
+  COMPLETE = "complete"
+  PARTIAL = "partial"
+  UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class EffectAttestation:
+  """Host declaration that an external action changed task-relevant state.
+
+  ``scope`` is descriptive (for example ``workspace`` or ``system``), not a
+  policy switch. ``changed`` is the only completion-relevant field. Keeping
+  this typed prevents core from guessing state changes from tool names or
+  shell commands while still supporting terminal tasks whose effects live
+  outside the current working directory.
+  """
+
+  changed: bool
+  scope: str = "external"
+  collector: str = "host"
+  summary: str | None = None
+
+  @classmethod
+  def from_value(cls, value: "EffectAttestation | dict[str, Any]") -> "EffectAttestation":
+    if isinstance(value, cls):
+      return value
+    if not isinstance(value, dict):
+      raise TypeError("effect attestation must be a mapping")
+    return cls(
+      changed=bool(value.get("changed", False)),
+      scope=str(value.get("scope", "external")),
+      collector=str(value.get("collector", "host")),
+      summary=str(value["summary"]) if value.get("summary") is not None else None,
+    )
 
 
 @dataclass(frozen=True)
@@ -32,6 +71,8 @@ class WorkspaceAttestation:
   created: tuple[str, ...] = ()
   modified: tuple[str, ...] = ()
   deleted: tuple[str, ...] = ()
+  policy_violations: tuple[str, ...] = ()
+  restored_paths: tuple[str, ...] = ()
   collector: str = "host"
 
   @classmethod
@@ -49,6 +90,8 @@ class WorkspaceAttestation:
       created=tuple(str(item) for item in value.get("created", ())),
       modified=tuple(str(item) for item in value.get("modified", ())),
       deleted=tuple(str(item) for item in value.get("deleted", ())),
+      policy_violations=tuple(str(item) for item in value.get("policy_violations", ())),
+      restored_paths=tuple(str(item) for item in value.get("restored_paths", ())),
       collector=str(value.get("collector", "host")),
     )
 
@@ -67,7 +110,19 @@ class ExternalToolReceipt:
   exit_code: int | None = None
   elapsed_seconds: float | None = None
   workspace: WorkspaceAttestation | None = None
+  effect: EffectAttestation | None = None
   host: str | None = None
+  artifact_ref: str | None = None
+  output_kind: str | None = None
+  original_bytes: int | None = None
+  truncated: bool = False
+  completeness: ObservationCompleteness = ObservationCompleteness.UNKNOWN
+
+  def __post_init__(self) -> None:
+    # Preserve explicitly supplied completeness, while mapping receipts from
+    # older hosts that only exposed ``truncated`` onto the typed contract.
+    if self.completeness == ObservationCompleteness.UNKNOWN and self.truncated:
+      object.__setattr__(self, "completeness", ObservationCompleteness.PARTIAL)
 
   @classmethod
   def from_value(cls, value: "ExternalToolReceipt | dict[str, Any] | Any") -> "ExternalToolReceipt":
@@ -75,15 +130,26 @@ class ExternalToolReceipt:
       return value
     # ``{"result": ...}`` is a common ordinary tool payload.  Treat a
     # mapping as a receipt only when it carries host-execution metadata.
-    if not isinstance(value, dict) or not {"workspace", "exit_code", "elapsed_seconds", "host"} & set(value):
+    receipt_keys = {
+      "workspace", "effect", "exit_code", "elapsed_seconds", "host", "artifact_ref",
+      "output_kind", "original_bytes", "truncated", "completeness",
+    }
+    if not isinstance(value, dict) or not receipt_keys & set(value):
       return cls(result=value)
     workspace = value.get("workspace")
+    effect = value.get("effect")
     return cls(
       result=value.get("result"),
       exit_code=value.get("exit_code"),
       elapsed_seconds=value.get("elapsed_seconds"),
       workspace=WorkspaceAttestation.from_value(workspace) if workspace is not None else None,
+      effect=EffectAttestation.from_value(effect) if effect is not None else None,
       host=str(value["host"]) if value.get("host") is not None else None,
+      artifact_ref=str(value["artifact_ref"]) if value.get("artifact_ref") is not None else None,
+      output_kind=str(value["output_kind"]) if value.get("output_kind") is not None else None,
+      original_bytes=int(value["original_bytes"]) if value.get("original_bytes") is not None else None,
+      truncated=bool(value.get("truncated", False)),
+      completeness=ObservationCompleteness(value.get("completeness", ObservationCompleteness.UNKNOWN)),
     )
 
 

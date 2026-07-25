@@ -41,3 +41,13 @@ def test_external_parser_collects_repeatable_agent_kwargs():
   assert cli._parse_agent_kwargs(args.agent_kwarg) == {
     "max_turns": 6, "requires_workspace_mutation": True,
   }
+
+
+def test_release_and_comparison_profiles_have_no_hidden_turn_limit():
+  parser = cli._build_parser()
+
+  matrix = parser.parse_args(["matrix", "plan", "--model", "test"])
+  comparison = parser.parse_args(["compare", "--dataset", "mbpp", "--model", "test"])
+
+  assert matrix.max_turns is None
+  assert comparison.max_turns is None

@@ -7,17 +7,20 @@ from nonoka.ext.eval.matrix import SCHEMA_VERSION, build_manifest
 from nonoka.ext.eval.models import EvalSample
 
 
-def test_default_matrix_is_full_and_pins_generation_policy():
-  manifest = build_manifest("deepseek-chat", temperature=0.0, max_turns=8, timeout=90.0)
+def test_default_matrix_is_full_and_separates_framework_and_harness_limits():
+  manifest = build_manifest("deepseek-chat", temperature=0.0, max_turns=None, timeout=90.0)
 
   assert manifest["schema_version"] == SCHEMA_VERSION
   assert manifest["policy"]["temperature"] == 0.0
+  assert manifest["policy"]["max_turns"] is None
+  assert manifest["policy"]["sample_timeout_seconds"] == 90.0
   assert "deterministic" in manifest["gates"]
   assert {job["id"] for job in manifest["jobs"]} == {
     "humaneval", "mbpp-sanitized", "evalplus-humaneval", "evalplus-mbpp",
     "tau3-retail", "tau3-airline", "terminal-bench",
   }
   assert next(job for job in manifest["jobs"] if job["id"] == "humaneval")["limit"] is None
+  assert next(job for job in manifest["jobs"] if job["id"] == "tau3-retail")["harness_max_steps"] == 24
   assert "Harbor" in next(job for job in manifest["jobs"] if job["id"] == "terminal-bench")["note"]
 
 
@@ -52,3 +55,7 @@ def test_evalplus_matrix_rejects_partial_task_selection(tmp_path):
 
   assert result["records"][0]["status"] == "blocked"
   assert "requires one completion for every benchmark task" in result["records"][0]["reason"]
+
+
+def test_matrix_accepts_v1_timeout_field():
+  assert matrix._sample_timeout_seconds({"timeout_seconds": 42}) == 42.0

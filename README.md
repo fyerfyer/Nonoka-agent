@@ -231,7 +231,7 @@ agents:
       - import: my_tools.weather:get_weather
 
   code_assistant:
-    model: deepseek-chat
+    model: deepseek/deepseek-v4-pro
     system_prompt: "You are a coding assistant."
 
 # Runner backend configuration (defaults are SQLite persistent)
@@ -241,7 +241,7 @@ runner:
   memory: sqlite            # or "in_memory", "disabled"
 
 defaults:
-  model: deepseek-chat
+  model: deepseek/deepseek-v4-pro
   max_turns: 10
 ```
 
@@ -436,6 +436,42 @@ async for event in runner.resume_external_tools(
 ```
 
 `ExternalCapability` carries `external=True` so the ReAct loop pauses instead of invoking the tool locally. This lets nonoka focus on decision-making while the host owns execution, permissions, and TUI rendering. A capability declared with `ToolExecution(mutates_workspace=True)` rejects a resume without this receipt; the receipt is recorded in the redacted trace. It makes the cross-process trust boundary auditable, but does not turn an untrusted host into a sandbox.
+
+#### Partial-observation fallbacks
+
+An external host may explicitly mark a receipt as `completeness="partial"`: for
+example, it could only return a preview of a large search result. A host can
+register a local, read-only capability as a **declarative observation fallback**
+so the next model turn also receives bounded evidence from a compatible local
+operation.
+
+```python
+from nonoka import tool, ToolExecution
+
+@tool(description="Return small evidence snippets from a bounded local scope.",
+      execution=ToolExecution(read_only=True))
+async def bounded_probe(ctx, query: str, scope: str, limit: int = 20):
+    ...
+
+bounded_probe.metadata = {
+    "kind": "observation_fallback",
+    "fallback": {
+        "on_partial_external": True,
+        # fallback argument -> source external-call argument
+        "argument_map": {"query": "query", "scope": "directory"},
+        "defaults": {"limit": 20},
+    },
+}
+```
+
+On a partial external receipt, Nonoka selects one registered declaration only
+when every mapped source argument is present and the fallback is read-only. It
+executes that local capability once and attaches its structured result to the
+partial observation before resuming the model. The framework does not match on
+host name, external tool name, task name, path, or content pattern; those
+semantics remain entirely in the capability declaration. A missing mapping,
+non-read-only capability, or a complete/unknown receipt simply skips the
+fallback.
 
 ### Evaluation policy and external benchmarks
 

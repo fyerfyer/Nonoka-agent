@@ -14,6 +14,14 @@ class CancelledError(AgentError):
   pass
 
 
+class RuntimeTerminatedError(AgentError):
+  """Raised when a persisted session-wide runtime limit terminates execution."""
+
+  def __init__(self, termination: Any):
+    self.termination = termination
+    super().__init__(termination.message)
+
+
 class TransientError(AgentError):
   """Temporary error (such as network timeout, interface rate limiting, etc.), suitable for retry"""
   pass
@@ -37,6 +45,15 @@ class SafetyError(AgentError):
 class ResourceError(AgentError):
   """Resource exhaustion (such as Token exceeded)"""
   pass
+
+
+class ContextBudgetExceeded(ResourceError):
+  """Protected protocol state cannot fit inside the configured context budget."""
+
+  def __init__(self, metrics: dict[str, int], limits: dict[str, int | None]):
+    self.metrics = metrics
+    self.limits = limits
+    super().__init__("Protected conversation state exceeds the configured context budget.")
 
 
 class MaxTurnsExceeded(AgentError):

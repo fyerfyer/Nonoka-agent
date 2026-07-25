@@ -437,6 +437,14 @@ async def test_react_agent_max_turns():
   assert session.status == SessionStatus.FAILED
 
 
+def test_session_allows_external_runner_to_own_cumulative_budgets():
+  agent = Agent(model="test", max_turns=None, max_steps=None)
+  session = Session(session_id="externally-bounded", agent=agent)
+
+  assert session.runtime_state.limits.max_model_turns is None
+  assert session.runtime_state.limits.max_tool_calls is None
+
+
 # --------------------------------------------------------------------------- #
 # Streaming interface
 # --------------------------------------------------------------------------- #

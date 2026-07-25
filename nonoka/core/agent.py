@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Generic, TypeVar, Any
 
 from nonoka.core.types import Capability, RetryPolicy, RunResult
+from nonoka.core.runtime import CompletionContract, RuntimeLimits
 
 DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
@@ -46,13 +47,18 @@ class Agent(Generic[DepsT, ResultT]):
   result_type: type[ResultT] | None = None
 
   # Default execution policy
-  max_turns: int = 10
-  max_steps: int = 50
+  # ``None`` explicitly disables the corresponding cumulative session budget.
+  # Concrete defaults preserve the framework's safe standalone behaviour;
+  # integrations may opt out when an external runner owns termination policy.
+  max_turns: int | None = 10
+  max_steps: int | None = 50
   max_concurrency: int = 10  # Max concurrent tool calls within a single turn
   temperature: float | None = None
   max_tokens: int | None = None
   default_retry: RetryPolicy = field(default_factory=RetryPolicy)
   default_timeout: float | None = None
+  runtime_limits: RuntimeLimits | None = None
+  completion_contract: CompletionContract | None = None
 
   # Optional bounded enhancements executed by ReAct.  They may provide
   # feedback and final-answer validation but cannot override core tool safety.

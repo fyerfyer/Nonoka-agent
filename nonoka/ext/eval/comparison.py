@@ -15,7 +15,7 @@ async def compare_strategies(
   model: str,
   strategies: tuple[str, ...] = ("direct", "tool_assisted", "verified_repair"),
   trials: int = 3,
-  max_turns: int = 8,
+  max_turns: int | None = None,
   timeout_seconds: float = 90.0,
   temperature: float | None = 0.0,
   runner_factory: Any | None = None,

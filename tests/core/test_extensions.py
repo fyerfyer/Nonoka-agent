@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -208,3 +209,123 @@ async def test_workspace_progress_extension_does_not_treat_stderr_redirect_as_mu
 
   assert decision.details["mutation_command_seen"] is False
   assert "workspace change" in (decision.feedback or "")
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_extension_uses_persisted_session_state():
+  extension = WorkspaceProgressExtension(max_exploration_turns=2)
+  session = type("Session", (), {"extension_state": {}})()
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="edit", turn=1,
+    tool_calls=[{"function": {"arguments": '{"command":"find . -type f"}'}}],
+  )
+
+  first = await extension.after_tool_batch(context)
+  restored = type(
+    "Session", (), {"extension_state": json.loads(json.dumps(session.extension_state))}
+  )()
+  context.session = restored
+  context.turn = 2
+  second = await extension.after_tool_batch(context)
+
+  assert first.feedback is None
+  assert "workspace change" in (second.feedback or "")
+  assert restored.extension_state["workspace_progress"]["exploration_turns"] == 2
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_extension_requires_post_effect_success_before_completion_nudge():
+  extension = WorkspaceProgressExtension(max_post_verification_batches=2)
+  usage = SimpleNamespace(
+    effect_count=1,
+    successful_command_count=1,
+    last_effect_at_observation=1,
+    last_successful_command_at_observation=1,
+    last_partial_observation_at=None,
+    last_complete_observation_at=1,
+  )
+  session = SimpleNamespace(
+    extension_state={},
+    runtime_state=SimpleNamespace(usage=usage),
+  )
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="configure", turn=1,
+    tool_calls=[{"function": {"arguments": '{"command":"apply-change"}'}}],
+  )
+
+  same_batch = await extension.after_tool_batch(context)
+  assert same_batch.feedback is None
+
+  usage.successful_command_count = 2
+  usage.last_successful_command_at_observation = 2
+  context.turn = 2
+  context.tool_calls = [{"function": {"arguments": '{"command":"check-change"}'}}]
+  verified = await extension.after_tool_batch(context)
+
+  assert "Completion evidence" in (verified.feedback or "")
+  assert verified.details["phase"] == "verification_ready"
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_extension_accepts_complete_post_effect_observation_without_exit_code():
+  extension = WorkspaceProgressExtension(max_post_verification_batches=2)
+  usage = SimpleNamespace(
+    effect_count=1,
+    successful_command_count=0,
+    last_effect_at_observation=4,
+    last_successful_command_at_observation=None,
+    last_partial_observation_at=None,
+    last_complete_observation_at=5,
+  )
+  session = SimpleNamespace(
+    extension_state={}, runtime_state=SimpleNamespace(usage=usage),
+  )
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="", turn=2,
+    tool_calls=[], tool_results=[],
+  )
+
+  decision = await extension.after_tool_batch(context)
+
+  assert "Completion evidence" in (decision.feedback or "")
+  assert decision.details["post_effect_complete"] is True
+  assert decision.details["successful_command_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_extension_has_bounded_post_verification_reminder():
+  extension = WorkspaceProgressExtension(max_post_verification_batches=2)
+  usage = SimpleNamespace(
+    effect_count=1,
+    successful_command_count=2,
+    last_effect_at_observation=1,
+    last_successful_command_at_observation=2,
+    last_partial_observation_at=None,
+    last_complete_observation_at=2,
+  )
+  session = SimpleNamespace(
+    extension_state={
+      "workspace_progress": {
+        "exploration_turns": 0,
+        "mutating": True,
+        "effect_count": 1,
+        "successful_command_count": 2,
+        "verification_ready": True,
+        "post_verification_batches": 0,
+        "completion_reminded": True,
+      }
+    },
+    runtime_state=SimpleNamespace(usage=usage),
+  )
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="configure", turn=3,
+    tool_calls=[{"function": {"arguments": '{"command":"inspect-again"}'}}],
+  )
+
+  first = await extension.after_tool_batch(context)
+  context.turn = 4
+  second = await extension.after_tool_batch(context)
+
+  assert first.feedback is None
+  assert "Verification budget" in (second.feedback or "")
+  assert second.details["verification_budget_reached"] is True

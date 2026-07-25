@@ -429,6 +429,19 @@ def test_agent_builder_basic():
   assert agent.tags == ["production"]
 
 
+def test_agent_builder_can_explicitly_disable_cumulative_budgets():
+  agent = (
+    AgentBuilder()
+    .model("gpt-4o")
+    .max_turns(None)
+    .max_steps(None)
+    .build()
+  )
+
+  assert agent.max_turns is None
+  assert agent.max_steps is None
+
+
 def test_agent_builder_with_tool():
   agent = (
     AgentBuilder()

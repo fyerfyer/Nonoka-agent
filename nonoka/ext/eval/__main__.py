@@ -228,7 +228,10 @@ def _build_parser() -> argparse.ArgumentParser:
   run_parser.add_argument("--model", required=True)
   run_parser.add_argument("--limit", "-n", type=int, default=None)
   run_parser.add_argument("--offset", type=int, default=0, help="Skip this many samples before applying --limit")
-  run_parser.add_argument("--max-turns", type=int, default=8)
+  run_parser.add_argument(
+    "--max-turns", type=int, default=None,
+    help="Optional cumulative model-turn budget (default: external timeout only).",
+  )
   run_parser.add_argument("--timeout", type=float, default=90.0)
   run_parser.add_argument("--temperature", type=float, default=0.0)
   run_parser.add_argument(
@@ -247,7 +250,10 @@ def _build_parser() -> argparse.ArgumentParser:
   compare_parser.add_argument("--offset", type=int, default=0)
   compare_parser.add_argument("--strategies", nargs="+", default=["direct", "tool_assisted", "verified_repair"])
   compare_parser.add_argument("--trials", type=int, default=3)
-  compare_parser.add_argument("--max-turns", type=int, default=8)
+  compare_parser.add_argument(
+    "--max-turns", type=int, default=None,
+    help="Optional model-turn budget; omitted by default.",
+  )
   compare_parser.add_argument("--timeout", type=float, default=90.0)
   compare_parser.add_argument("--temperature", type=float, default=0.0)
   compare_parser.add_argument("--output")
@@ -285,7 +291,10 @@ def _build_parser() -> argparse.ArgumentParser:
   matrix_plan = matrix_subparsers.add_parser("plan", help="Write a pinned benchmark manifest without model calls")
   matrix_plan.add_argument("--model", required=True)
   matrix_plan.add_argument("--temperature", type=float, default=0.0)
-  matrix_plan.add_argument("--max-turns", type=int, default=8)
+  matrix_plan.add_argument(
+    "--max-turns", type=int, default=None,
+    help="Optional framework model-turn budget; omitted for release profiles.",
+  )
   matrix_plan.add_argument("--timeout", type=float, default=90.0)
   matrix_plan.add_argument("--output")
   matrix_plan.set_defaults(func=cmd_matrix_plan)

@@ -5,8 +5,9 @@ Run with:
     uv run pytest tests/integration/test_plan_generation.py -s -v
 """
 
-import pytest
 import asyncio
+import os
+import pytest
 from nonoka.core.agent import Agent
 from nonoka.core.tool import tool
 from nonoka.core.context import RunContext
@@ -43,8 +44,11 @@ async def format_report(title: str, result: float) -> str:
 
 @pytest.fixture
 def test_agent():
+  model_name = os.getenv("NONOKA_TEST_MODEL", "deepseek-v4-pro")
+  if os.getenv("OPENAI_BASE_URL"):
+    model_name = f"openai/{model_name}"
   return Agent(
-    model="deepseek-chat",
+    model=model_name,
     tools=[get_weather, calculate, format_report],
     system_prompt="You are a helpful assistant that plans and executes tasks using available tools.",
     max_turns=5,
@@ -99,6 +103,7 @@ def test_explicit_plan_topological_groups():
 # End-to-end execution tests
 # --------------------------------------------------------------------------- #
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_e2e_conversational_no_tools_needed(test_agent, runner):
   """A greeting should run via ReAct and succeed."""
@@ -116,6 +121,7 @@ async def test_e2e_conversational_no_tools_needed(test_agent, runner):
   assert result.data is not None
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_e2e_single_tool_call(test_agent, runner):
   """A single-tool task should run successfully."""
@@ -155,6 +161,7 @@ async def test_e2e_explicit_plan_execution(test_agent, runner):
   assert "Multiplication" in str(report_result)
 
 
+@pytest.mark.live
 @pytest.mark.asyncio
 async def test_e2e_agent_shortcut(test_agent):
   """Agent.run() shortcut should work end-to-end."""

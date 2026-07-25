@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import anyio
 from collections.abc import AsyncIterator
 from typing import Any, Protocol, runtime_checkable
 
@@ -22,6 +23,7 @@ from nonoka.core.errors import (
   ToolFatalError,
   TransientError,
   CancelledError,
+  RuntimeTerminatedError,
   MaxTurnsExceeded,
   MaxStepsExceeded,
   ToolErrorActionType,
@@ -115,9 +117,9 @@ class ReActAgent:
       *list(getattr(session.agent, "extensions", [])), *self.extensions,
     ])
     try:
-      for turn in range(session.agent.max_turns):
-        session.check_cancelled()
-        session.turn_count = turn + 1
+      while True:
+        turn = session.begin_model_turn() - 1
+        await session.enforce_context_budget()
 
         start_decision = await extension_manager.before_turn(LoopExtensionContext(
           session=session, runner=runner, prompt=prompt, turn=turn + 1,
@@ -156,13 +158,39 @@ class ReActAgent:
         )
         await runner.hooks.emit_llm_request(hook_ctx, messages, tools)
         try:
-          response = await runner.llm.chat(
-            messages=messages,
-            tools=tools or None,
-            temperature=session.agent.temperature,
-            max_tokens=session.agent.max_tokens,
-          )
+          model_timeout = session.runtime_state.limits.model_timeout_seconds
+          remaining = session.runtime_state.remaining_seconds()
+          effective_timeout = min(
+            value for value in (model_timeout, remaining) if value is not None
+          ) if model_timeout is not None or remaining is not None else None
+          if effective_timeout is None:
+            response = await runner.llm.chat(
+              messages=messages, tools=tools or None,
+              temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
+            )
+          else:
+            with anyio.fail_after(effective_timeout):
+              response = await runner.llm.chat(
+                messages=messages, tools=tools or None,
+                temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
+              )
           await runner.hooks.emit_llm_response(hook_ctx, response)
+        except TimeoutError as exc:
+          deadline_limited = remaining is not None and (
+            model_timeout is None or remaining <= model_timeout
+          )
+          from nonoka.core.runtime import TerminalReason, Termination
+          termination = Termination(
+            reason=(TerminalReason.DEADLINE_EXCEEDED if deadline_limited else TerminalReason.MODEL_TIMEOUT),
+            message=(
+              f"Session {session.session_id} exceeded its wall-clock deadline."
+              if deadline_limited else f"Model call timed out after {effective_timeout} seconds."
+            ),
+            dimension=("wall_timeout_seconds" if deadline_limited else "model_timeout_seconds"),
+            limit=effective_timeout,
+          )
+          session.terminate(termination)
+          raise RuntimeTerminatedError(termination) from exc
         except CancelledError:
           raise
         except Exception as exc:
@@ -203,6 +231,13 @@ class ReActAgent:
             await runner.checkpoint_store.save_session(session.session_id, session.to_state())
             continue
 
+          contract_feedback = session.completion_feedback()
+          if contract_feedback is not None:
+            if session.memory is not None:
+              await session.memory.add(contract_feedback, MemoryRole.SYSTEM)
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            continue
+
           # result_type parsing
           parsed_data: Any = content
           if session.agent.result_type is not None:
@@ -230,6 +265,14 @@ class ReActAgent:
 
         # Enforce max_steps before executing tools
         num_tool_calls = len(response.tool_calls)
+        external_count = sum(
+          bool(getattr(self._capability_for_call(session, tc), "external", False))
+          for tc in response.tool_calls
+        )
+        last_tool = response.tool_calls[-1].get("function", {}).get("name", "")
+        session.reserve_tool_calls(
+          num_tool_calls, external_count=external_count, last_tool=last_tool,
+        )
         if session.agent.max_steps is not None and session.step_count + num_tool_calls > session.agent.max_steps:
           raise MaxStepsExceeded(
             f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
@@ -297,14 +340,18 @@ class ReActAgent:
               if suggested:
                 tool_guidance.append(f"[Tool guidance] {suggested}")
 
-              if tr.get("has_more") is False and self._is_pagination_tool(session, func_name):
+              # ``has_more`` is part of the ToolResponse protocol itself.
+              # Honour an explicit terminal signal even when the tool did not
+              # opt into pagination metadata; that metadata only tunes loop
+              # detection for legitimate repeated page fetches.
+              if tr.get("has_more") is False:
                 has_more_notices.append(
                   f"[System notice] {func_name or 'the tool'} returned 'has_more': false — "
                   "there is no additional data available."
                 )
 
         if session.memory is not None:
-          await session.memory.enforce_budget()
+          await session.enforce_context_budget()
           for notice in has_more_notices + tool_guidance:
             await session.memory.add(notice, MemoryRole.SYSTEM)
 
@@ -335,9 +382,20 @@ class ReActAgent:
         # Checkpoint after each turn
         await runner.checkpoint_store.save_session(session.session_id, session.to_state())
 
-      # Max turns exceeded
-      raise MaxTurnsExceeded(
-        f"Max turns ({session.agent.max_turns}) exceeded for session {session.session_id}"
+    except RuntimeTerminatedError as e:
+      session.status = SessionStatus.CANCELLED if e.termination.reason.value == "cancelled" else SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      return RunResult(
+        success=False,
+        session=session,
+        error=str(e),
+        error_type=(
+          "limit_exceeded"
+          if e.termination.reason.value in {"turn_budget_exhausted", "tool_budget_exhausted"}
+          else e.termination.reason.value
+        ),
+        termination=e.termination,
       )
 
     except CancelledError as e:
@@ -507,6 +565,7 @@ class ReActAgent:
 
     if session.memory is None:
       raise RuntimeError("Cannot resume external tools: session has no memory.")
+    session.check_runtime()
 
     # Find the last assistant message that contains pending tool_calls.
     pending_tool_calls: list[dict[str, Any]] = []
@@ -523,22 +582,26 @@ class ReActAgent:
 
     # Determine which pending tool calls already have a result in memory.
     existing_tool_ids: set[str] = set()
+    existing_tool_results: dict[str, str] = {}
     if assistant_entry_index is not None:
       for entry in session.memory.entries[assistant_entry_index + 1:]:
         if entry.role == MemoryRole.TOOL:
           tc_id = entry.metadata.get("tool_call_id")
           if tc_id:
             existing_tool_ids.add(str(tc_id))
+            existing_tool_results[str(tc_id)] = entry.content
 
     # Inject results for pending tool calls that are not already in memory.
+    resumed_tool_results: list[Any] = []
     for tc in pending_tool_calls:
       tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
       tc_name = tc.get("function", {}).get("name", "")
 
       if tc_id in existing_tool_ids:
+        resumed_tool_results.append(existing_tool_results.get(str(tc_id), ""))
         continue
 
-      from nonoka.core.external_tool import ExternalToolReceipt
+      from nonoka.core.external_tool import ExternalToolReceipt, ObservationCompleteness
 
       raw_result = results.get(tc_id)
       capability = self._capability_for_call(session, tc)
@@ -554,6 +617,11 @@ class ReActAgent:
           str(tc_id), receipt, verified=receipt.workspace is not None,
         )
       result = receipt.result if receipt is not None else None
+      resumed_tool_results.append(
+        result
+        if raw_result is not None
+        else {"error": f"No result returned by external host for tool '{tc_name}'"}
+      )
       if raw_result is None:
         obs_text = json.dumps(
           {"error": f"No result returned by external host for tool '{tc_name}'", "tool_call_id": tc_id},
@@ -565,15 +633,194 @@ class ReActAgent:
       else:
         obs_text = result
 
+      if receipt is not None and receipt.workspace is not None:
+        violations = list(receipt.workspace.policy_violations)
+        restored = set(receipt.workspace.restored_paths)
+        if violations:
+          usage = session.runtime_state.usage
+          usage.policy_violation_count += len(violations)
+          for path in violations:
+            if path not in usage.policy_violations:
+              usage.policy_violations.append(path)
+          unrestored = [path for path in violations if path not in restored]
+          if unrestored:
+            from nonoka.core.errors import RuntimeTerminatedError
+            from nonoka.core.runtime import TerminalReason, Termination
+            termination = Termination(
+              reason=TerminalReason.EXECUTION_POLICY_VIOLATION,
+              message="External execution modified protected workspace inputs.",
+              dimension="workspace_policy",
+              diagnostics={"paths": unrestored},
+            )
+            session.terminate(termination)
+            raise RuntimeTerminatedError(termination)
+          obs_text = (
+            "[Execution policy] The host restored protected workspace inputs modified by "
+            f"this tool: {', '.join(violations)}. Treat these paths as immutable and use "
+            "a different approach.\n\n" + obs_text
+          )
+
+      result_limit = session.runtime_state.limits.max_external_result_bytes
+      original_bytes = len(obs_text.encode("utf-8"))
+      was_truncated = result_limit is not None and original_bytes > result_limit
+
+      observed_completeness: ObservationCompleteness | None = None
+      observation_index: int | None = None
+      if receipt is not None:
+        observed_completeness = (
+          ObservationCompleteness.PARTIAL if was_truncated else receipt.completeness
+        )
+        usage = session.runtime_state.usage
+        usage.observation_count += 1
+        observation_index = usage.observation_count
+        if observed_completeness == ObservationCompleteness.PARTIAL:
+          usage.partial_observation_count += 1
+          usage.last_partial_observation_at = observation_index
+          usage.latest_partial_tool = str(tc_name) or None
+          usage.latest_partial_artifact_ref = receipt.artifact_ref
+          obs_text = (
+            "[Partial observation] This host result is not complete and cannot establish "
+            "exhaustive absence or full coverage. Narrow the query or inspect a bounded "
+            "artifact or region before making a completion claim.\n\n" + obs_text
+          )
+          fallback_guidance = self._observation_fallback_guidance(session)
+          if fallback_guidance:
+            obs_text = fallback_guidance + "\n\n" + obs_text
+          automatic_fallback = await self._execute_partial_observation_fallback(
+            session, runner, tc,
+          )
+          if automatic_fallback is not None:
+            fallback_name, fallback_result = automatic_fallback
+            fallback_text = (
+              fallback_result
+              if isinstance(fallback_result, str)
+              else json.dumps(fallback_result, ensure_ascii=False, default=str)
+            )
+            obs_text = (
+              f"[Automatic local observation fallback: {fallback_name}]\n"
+              f"{fallback_text}\n\n" + obs_text
+            )
+        elif observed_completeness == ObservationCompleteness.COMPLETE:
+          usage.last_complete_observation_at = observation_index
+          if (
+            usage.last_partial_observation_at is not None
+            and observation_index > usage.last_partial_observation_at
+          ):
+            usage.complete_observations_after_partial += 1
+        else:
+          usage.unknown_observation_count += 1
+
+      # Compact after adding framework feedback so the complete observation
+      # stored in memory remains within the declared result budget.
+      if was_truncated and result_limit is not None:
+        marker = "\n...[external result compacted by nonoka]...\n"
+        marker_bytes = len(marker.encode("utf-8"))
+        side = max(1, (result_limit - marker_bytes) // 2)
+        encoded = obs_text.encode("utf-8")
+        obs_text = (
+          encoded[:side].decode("utf-8", errors="ignore")
+          + marker
+          + encoded[-side:].decode("utf-8", errors="ignore")
+        )
+
+      workspace_changes = None
+      workspace_changed = False
+      if receipt is not None and receipt.workspace is not None:
+        workspace_changes = {
+          "created": list(receipt.workspace.created),
+          "modified": list(receipt.workspace.modified),
+          "deleted": list(receipt.workspace.deleted),
+        }
+        changed = sum(len(items) for items in workspace_changes.values())
+        if changed:
+          workspace_changed = True
+          usage = session.runtime_state.usage
+          usage.mutation_count += changed
+          if usage.first_mutation_at is None:
+            usage.first_mutation_at = __import__("datetime").datetime.now().astimezone()
+          for path in [*workspace_changes["created"], *workspace_changes["modified"], *workspace_changes["deleted"]]:
+            if path not in usage.changed_paths:
+              usage.changed_paths.append(path)
+      if receipt is not None and (
+        workspace_changed or (receipt.effect is not None and receipt.effect.changed)
+      ):
+        usage = session.runtime_state.usage
+        usage.effect_count += 1
+        usage.last_effect_at_observation = observation_index
+      if receipt is not None and receipt.exit_code == 0:
+        raw_arguments = tc.get("function", {}).get("arguments", {})
+        if isinstance(raw_arguments, str):
+          try:
+            raw_arguments = json.loads(raw_arguments)
+          except json.JSONDecodeError:
+            raw_arguments = {}
+        if isinstance(raw_arguments, dict):
+          command = raw_arguments.get("command")
+          if isinstance(command, str):
+            usage = session.runtime_state.usage
+            if command not in usage.verified_commands:
+              usage.verified_commands.append(command)
+            usage.successful_command_count += 1
+            usage.last_successful_command = command
+            usage.last_successful_command_at_observation = observation_index
+
       await session.memory.add(
         obs_text,
         MemoryRole.TOOL,
         defer_budget=True,
         tool_call_id=tc_id,
         tool_name=tc_name,
+        exit_code=receipt.exit_code if receipt is not None else None,
+        artifact_ref=receipt.artifact_ref if receipt is not None else None,
+        output_kind=receipt.output_kind if receipt is not None else None,
+        original_bytes=(receipt.original_bytes if receipt and receipt.original_bytes else original_bytes),
+        truncated=(receipt.truncated if receipt is not None else False) or was_truncated,
+        completeness=observed_completeness.value if observed_completeness is not None else None,
+        workspace_changes=workspace_changes,
       )
 
-    await session.memory.enforce_budget()
+    await session.enforce_context_budget()
+
+    # External execution is one logical tool batch. Run extension and loop
+    # decisions only after every TOOL receipt has been inserted, preserving
+    # the provider-required ASSISTANT(tool_calls) -> TOOL* adjacency.
+    extension_manager = LoopExtensionManager([
+      *list(getattr(session.agent, "extensions", [])), *self.extensions,
+    ])
+    batch_decision = await extension_manager.after_tool_batch(LoopExtensionContext(
+      session=session,
+      runner=runner,
+      prompt="",
+      turn=session.turn_count,
+      tool_calls=pending_tool_calls,
+      tool_results=resumed_tool_results,
+    ))
+    if batch_decision.failure:
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(type="error", data={
+        "success": False,
+        "error": batch_decision.failure,
+        "error_type": "extension_rejected",
+      })
+      return
+    if batch_decision.feedback:
+      await session.memory.add(batch_decision.feedback, MemoryRole.SYSTEM)
+
+    if await self._detect_and_break_loops(
+      session, pending_tool_calls, resumed_tool_results,
+    ):
+      session.status = SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(type="error", data={
+        "success": False,
+        "error": "Agent loop detected during external tool execution.",
+        "error_type": "loop_detected",
+      })
+      return
+
     session.status = SessionStatus.RUNNING
     session.end_time = None
     await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -611,9 +858,9 @@ class ReActAgent:
       *list(getattr(session.agent, "extensions", [])), *self.extensions,
     ])
     try:
-      for turn in range(session.agent.max_turns):
-        session.check_cancelled()
-        session.turn_count = turn + 1
+      while True:
+        turn = session.begin_model_turn() - 1
+        await session.enforce_context_budget()
 
         start_decision = await extension_manager.before_turn(LoopExtensionContext(
           session=session, runner=runner, prompt=prompt, turn=turn + 1,
@@ -663,10 +910,8 @@ class ReActAgent:
 
         try:
           stream = runner.llm.chat_stream(
-            messages=messages,
-            tools=tools or None,
-            temperature=session.agent.temperature,
-            max_tokens=session.agent.max_tokens,
+            messages=messages, tools=tools or None,
+            temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
           )
         except CancelledError:
           raise
@@ -679,19 +924,48 @@ class ReActAgent:
           )
           raise TransientError(f"LLM streaming call failed: {exc}") from exc
 
-        async for chunk in stream:
-          if chunk.content_delta:
-            accumulated_content += chunk.content_delta
-            yield StreamEvent(
-              type="content_delta",
-              data={"content": chunk.content_delta},
-            )
-
-          if chunk.tool_call_deltas:
-            self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
-
-          if chunk.finish_reason:
-            break
+        model_timeout = session.runtime_state.limits.model_timeout_seconds
+        remaining = session.runtime_state.remaining_seconds()
+        effective_timeout = min(
+          value for value in (model_timeout, remaining) if value is not None
+        ) if model_timeout is not None or remaining is not None else None
+        try:
+          timeout_scope = anyio.fail_after(effective_timeout) if effective_timeout is not None else None
+          if timeout_scope is None:
+            async for chunk in stream:
+              if chunk.content_delta:
+                accumulated_content += chunk.content_delta
+                yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
+              if chunk.tool_call_deltas:
+                self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
+              if chunk.finish_reason:
+                break
+          else:
+            with timeout_scope:
+              async for chunk in stream:
+                if chunk.content_delta:
+                  accumulated_content += chunk.content_delta
+                  yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
+                if chunk.tool_call_deltas:
+                  self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
+                if chunk.finish_reason:
+                  break
+        except TimeoutError as exc:
+          deadline_limited = remaining is not None and (
+            model_timeout is None or remaining <= model_timeout
+          )
+          from nonoka.core.runtime import TerminalReason, Termination
+          termination = Termination(
+            reason=(TerminalReason.DEADLINE_EXCEEDED if deadline_limited else TerminalReason.MODEL_TIMEOUT),
+            message=(
+              f"Session {session.session_id} exceeded its wall-clock deadline."
+              if deadline_limited else f"Model call timed out after {effective_timeout} seconds."
+            ),
+            dimension=("wall_timeout_seconds" if deadline_limited else "model_timeout_seconds"),
+            limit=effective_timeout,
+          )
+          session.terminate(termination)
+          raise RuntimeTerminatedError(termination) from exc
 
         tool_calls = self._finalize_tool_calls(accumulated_tool_calls)
         response = LLMResponse(
@@ -733,6 +1007,13 @@ class ReActAgent:
           if final_decision.continue_loop:
             if session.memory is not None and final_decision.feedback:
               await session.memory.add(final_decision.feedback, MemoryRole.SYSTEM)
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            continue
+
+          contract_feedback = session.completion_feedback()
+          if contract_feedback is not None:
+            if session.memory is not None:
+              await session.memory.add(contract_feedback, MemoryRole.SYSTEM)
             await runner.checkpoint_store.save_session(session.session_id, session.to_state())
             continue
 
@@ -782,16 +1063,34 @@ class ReActAgent:
         enriched_tool_calls = []
         for tc in response.tool_calls:
           tc_name = tc.get("function", {}).get("name", "")
+          capability = self._capability_for_call(session, tc)
           enriched = dict(tc)
           enriched["metadata"] = tool_metadata.get(tc_name) or {}
+          # A capability may run inside the framework while its session is
+          # hosted by an external UI.  Such a capability can opt out of host
+          # lifecycle events without changing its execution semantics.  This
+          # keeps private, local observations out of host tool registries.
+          enriched["host_visible"] = bool(getattr(capability, "host_visible", True))
           enriched_tool_calls.append(enriched)
 
-        yield StreamEvent(
-          type="tool_call_start",
-          data={"tool_calls": enriched_tool_calls},
-        )
+        host_visible_calls = [
+          call for call in enriched_tool_calls if call.get("host_visible", True)
+        ]
+        if host_visible_calls:
+          yield StreamEvent(
+            type="tool_call_start",
+            data={"tool_calls": host_visible_calls},
+          )
 
         num_tool_calls = len(response.tool_calls)
+        external_count = sum(
+          bool(getattr(self._capability_for_call(session, tc), "external", False))
+          for tc in response.tool_calls
+        )
+        last_tool = response.tool_calls[-1].get("function", {}).get("name", "")
+        session.reserve_tool_calls(
+          num_tool_calls, external_count=external_count, last_tool=last_tool,
+        )
         if session.agent.max_steps is not None and session.step_count + num_tool_calls > session.agent.max_steps:
           raise MaxStepsExceeded(
             f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
@@ -822,11 +1121,62 @@ class ReActAgent:
           if isinstance(item, asyncio.CancelledError):
             raise item
 
-        # External tools: if any tool call must be executed by the host,
-        # pause the turn. The tool_call_start event was already emitted, so
-        # the caller can forward the call to the external host and resume
-        # later with the result.
+        # External tools: execute any local calls from the same model response
+        # before pausing for host work.  This is essential for mixed tool
+        # batches: a local capability must not be silently delegated merely
+        # because a sibling call is external.  ``resume_external_tools``
+        # already recognises tool results persisted after the assistant call,
+        # so it injects only the genuinely pending external receipts later.
         if any(isinstance(item, ExternalToolExecutionRequiredError) for item in tool_results):
+          last_local_result: Any = None
+          for tc, item in zip(response.tool_calls, tool_results):
+            if isinstance(item, ExternalToolExecutionRequiredError):
+              continue
+            tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+            tc_name = tc.get("function", {}).get("name", "")
+            capability = self._capability_for_call(session, tc)
+            host_visible = bool(getattr(capability, "host_visible", True))
+            if isinstance(item, Exception):
+              obs_text = f"Error: {type(item).__name__}: {item}"
+              yield StreamEvent(
+                type="tool_call_result",
+                data={
+                  "tool_call_id": tc_id,
+                  "name": tc_name,
+                  "result_preview": obs_text[:500],
+                  "is_error": True,
+                  "host_visible": host_visible,
+                },
+              )
+            else:
+              last_local_result = item
+              obs_text = (
+                json.dumps(item, ensure_ascii=False, default=str)
+                if not isinstance(item, str) else item
+              )
+              yield StreamEvent(
+                type="tool_call_result",
+                data={
+                  "tool_call_id": tc_id,
+                  "name": tc_name,
+                  "result_preview": str(item)[:500],
+                  "result": item,
+                  "is_error": False,
+                  "host_visible": host_visible,
+                },
+              )
+            if session.memory is not None:
+              await session.memory.add(
+                obs_text,
+                MemoryRole.TOOL,
+                defer_budget=True,
+                tool_call_id=tc_id,
+                tool_name=tc_name,
+              )
+          session._last_tool_result = last_local_result  # type: ignore[attr-defined]
+
+          if session.memory is not None:
+            await session.enforce_context_budget()
           session.status = SessionStatus.PAUSED
           session.end_time = __import__("datetime").datetime.now()
           await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -903,6 +1253,7 @@ class ReActAgent:
                 "name": tc_name,
                 "result_preview": obs_text[:500],
                 "is_error": True,
+                "host_visible": bool(getattr(self._capability_for_call(session, tc), "host_visible", True)),
               },
             )
             if session.memory is not None:
@@ -926,6 +1277,7 @@ class ReActAgent:
               "result_preview": str(tr)[:500],
               "result": tr,
               "is_error": False,
+              "host_visible": bool(getattr(self._capability_for_call(session, tc), "host_visible", True)),
             },
           )
 
@@ -939,7 +1291,7 @@ class ReActAgent:
             )
 
         if session.memory is not None:
-          await session.memory.enforce_budget()
+          await session.enforce_context_budget()
 
         # Inject ToolResponse metadata SYSTEM messages *after* all TOOL
         # entries so that ASSISTANT+tool_calls stay contiguous with their
@@ -956,7 +1308,7 @@ class ReActAgent:
               if suggested:
                 stream_guidance.append(f"[Tool guidance] {suggested}")
               func_name = tc.get("function", {}).get("name", "the tool")
-              if tr.get("has_more") is False and self._is_pagination_tool(session, func_name):
+              if tr.get("has_more") is False:
                 stream_notices.append(
                   f"[System notice] {func_name} returned 'has_more': false — "
                   "there is no additional data available."
@@ -999,8 +1351,22 @@ class ReActAgent:
 
         await runner.checkpoint_store.save_session(session.session_id, session.to_state())
 
-      raise MaxTurnsExceeded(
-        f"Max turns ({session.agent.max_turns}) exceeded for session {session.session_id}"
+    except RuntimeTerminatedError as e:
+      session.status = SessionStatus.CANCELLED if e.termination.reason.value == "cancelled" else SessionStatus.FAILED
+      session.end_time = __import__("datetime").datetime.now()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      yield StreamEvent(
+        type="error",
+        data={
+          "success": False,
+          "error": str(e),
+          "error_type": (
+            "limit_exceeded"
+            if e.termination.reason.value in {"turn_budget_exhausted", "tool_budget_exhausted"}
+            else e.termination.reason.value
+          ),
+          "termination": e.termination.model_dump(mode="json"),
+        },
       )
 
     except CancelledError as e:
@@ -1153,6 +1519,78 @@ class ReActAgent:
   def _capability_for_call(self, session: Session, tool_call: dict[str, Any]) -> Any | None:
     name = tool_call.get("function", {}).get("name", "")
     return next((tool for tool in session.agent.tools if tool.name == name), None)
+
+  @staticmethod
+  def _observation_fallback_guidance(session: Session) -> str:
+    """Describe registered local fallbacks for a partial host observation."""
+    available: list[str] = []
+    for tool in session.agent.tools:
+      metadata = getattr(tool, "metadata", None)
+      if not isinstance(metadata, dict) or metadata.get("kind") != "observation_fallback":
+        continue
+      description = str(getattr(tool, "description", "")).strip()
+      available.append(f"{tool.name}: {description}" if description else str(tool.name))
+    if not available:
+      return ""
+    return (
+      "[Local observation fallback] The preceding host observation was partial. "
+      "Before relying on it or retrying the same broad host query, use one of these "
+      "local capabilities for bounded evidence: " + "; ".join(available)
+    )
+
+  async def _execute_partial_observation_fallback(
+    self,
+    session: Session,
+    runner: Any,
+    source_call: dict[str, Any],
+  ) -> tuple[str, Any] | None:
+    """Run one declared read-only fallback for a partial external receipt.
+
+    A fallback is opt-in capability metadata, not a host-name heuristic. Its
+    ``fallback`` declaration maps source-call argument names to the fallback's
+    input names and supplies any static defaults. This lets a framework host
+    provide bounded local evidence without knowing which external search tool
+    produced the incomplete observation.
+    """
+    source_args = source_call.get("function", {}).get("arguments", {})
+    if isinstance(source_args, str):
+      try:
+        source_args = json.loads(source_args)
+      except json.JSONDecodeError:
+        return None
+    if not isinstance(source_args, dict):
+      return None
+
+    for capability in session.agent.tools:
+      metadata = getattr(capability, "metadata", None)
+      if not isinstance(metadata, dict) or metadata.get("kind") != "observation_fallback":
+        continue
+      declaration = metadata.get("fallback")
+      if not isinstance(declaration, dict) or not declaration.get("on_partial_external"):
+        continue
+      if not execution_for(capability).read_only:
+        continue
+      argument_map = declaration.get("argument_map", {})
+      defaults = declaration.get("defaults", {})
+      if not isinstance(argument_map, dict) or not isinstance(defaults, dict):
+        continue
+      arguments = dict(defaults)
+      if any(not isinstance(target, str) or source not in source_args for target, source in argument_map.items()):
+        continue
+      arguments.update({target: source_args[source] for target, source in argument_map.items()})
+
+      synthetic_call = {
+        "id": f"fallback_{source_call.get('id') or source_call.get('tool_call_id') or 'unknown'}",
+        "type": "function",
+        "function": {"name": capability.name, "arguments": json.dumps(arguments)},
+      }
+      try:
+        session.reserve_tool_calls(1, last_tool=capability.name)
+        result = await self._execute_tool_call(session, runner, synthetic_call)
+      except Exception as exc:
+        return capability.name, {"error": f"{type(exc).__name__}: {exc}"}
+      return capability.name, result
+    return None
 
   def _is_pagination_tool(self, session: Session, tool_name: str) -> bool:
     capability = next((tool for tool in session.agent.tools if tool.name == tool_name), None)
@@ -1445,7 +1883,15 @@ class ReActAgent:
     if history and _has_more_false(len(result_history) - 1):
       h1_threshold = max(2, h1_threshold - 1)
 
-    h1_triggered = (not execution.is_stateful) and consecutive_count >= h1_threshold
+    # One model response may intentionally batch the same read-only tool over
+    # different files. That is parallel exploration, not a repeated
+    # action-observation cycle. Exact duplicates remain covered by the
+    # signature heuristic below.
+    h1_triggered = (
+      len(current_sigs) == 1
+      and not execution.is_stateful
+      and consecutive_count >= h1_threshold
+    )
 
     # -- Heuristic 2: repeated (name, args) pair --------------------------
     recent = history[-10:]

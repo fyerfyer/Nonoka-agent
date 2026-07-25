@@ -44,7 +44,28 @@ from nonoka.core.tool_response import (
 from nonoka.core.system_prompts import SystemPromptTemplate
 from nonoka.config import Config, ConfigLoadError
 from nonoka.core.builder import AgentBuilder, RunnerBuilder
-from nonoka.core.external_tool import ExternalCapability, ExternalToolReceipt, WorkspaceAttestation
+from nonoka.core.external_tool import (
+  EffectAttestation,
+  ExternalCapability,
+  ExternalToolReceipt,
+  ObservationCompleteness,
+  WorkspaceAttestation,
+)
+from nonoka.core.runtime import (
+  CommandSucceededRule,
+  CompleteObservationRule,
+  CompletionContract,
+  CompletionRule,
+  ObservedEffectRule,
+  PathsChangedRule,
+  RuntimeLimits,
+  RuntimeUsage,
+  SessionRuntimeState,
+  TerminalReason,
+  Termination,
+  WorkspaceMutationRule,
+)
+from nonoka.core.memory import ContextBudget, ContextCompactor, ContextMetrics, ProtocolAwareContextCompactor
 from nonoka.core.external_mcp import (
   ExternalMCPRegistry,
   ExternalMCPServer,
@@ -109,7 +130,25 @@ __all__ = [
   # External registries
   "ExternalCapability",
   "ExternalToolReceipt",
+  "EffectAttestation",
+  "ObservationCompleteness",
   "WorkspaceAttestation",
+  "CompletionContract",
+  "CompletionRule",
+  "WorkspaceMutationRule",
+  "ObservedEffectRule",
+  "PathsChangedRule",
+  "CommandSucceededRule",
+  "CompleteObservationRule",
+  "RuntimeLimits",
+  "RuntimeUsage",
+  "SessionRuntimeState",
+  "TerminalReason",
+  "Termination",
+  "ContextBudget",
+  "ContextCompactor",
+  "ContextMetrics",
+  "ProtocolAwareContextCompactor",
   "ExternalMCPRegistry",
   "ExternalMCPServer",
   "ExternalMCPToolDefinition",

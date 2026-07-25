@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Callable, Protocol, runtime_checkable
 from pydantic import BaseModel, Field
 
 from nonoka.core.logger import get_logger
@@ -22,6 +24,195 @@ class MemoryEntry(BaseModel):
   content: str
   metadata: dict[str, Any] = Field(default_factory=dict)
   tokens: int = 0  # Token count
+
+
+@dataclass(frozen=True)
+class ContextBudget:
+  max_bytes: int | None = None
+  max_tokens: int | None = None
+  max_tool_messages: int | None = None
+
+
+@dataclass(frozen=True)
+class ContextMetrics:
+  serialized_bytes: int
+  tokens: int
+  tool_messages: int
+
+
+@dataclass
+class ContextCompactionResult:
+  entries: list[MemoryEntry]
+  metrics: ContextMetrics
+  compacted_entries: int = 0
+  exceeded: bool = False
+
+
+@runtime_checkable
+class ContextCompactor(Protocol):
+  """Replace history with a provider-valid representation within a budget."""
+
+  async def compact(
+    self,
+    entries: list[MemoryEntry],
+    budget: ContextBudget,
+    count_tokens: Callable[[str], int],
+  ) -> ContextCompactionResult: ...
+
+
+class ProtocolAwareContextCompactor:
+  """Deterministic compactor preserving task and tool protocol integrity."""
+
+  _LEDGER_MAX_BYTES = 12 * 1024
+
+  @staticmethod
+  def _metrics(entries: list[MemoryEntry]) -> ContextMetrics:
+    payload = [entry.model_dump(mode="json") for entry in entries]
+    size = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return ContextMetrics(
+      serialized_bytes=size,
+      tokens=sum(entry.tokens for entry in entries),
+      tool_messages=sum(entry.role == MemoryRole.TOOL for entry in entries),
+    )
+
+  @staticmethod
+  def _within(metrics: ContextMetrics, budget: ContextBudget) -> bool:
+    return (
+      (budget.max_bytes is None or metrics.serialized_bytes <= budget.max_bytes)
+      and (budget.max_tokens is None or metrics.tokens <= budget.max_tokens)
+      and (budget.max_tool_messages is None or metrics.tool_messages <= budget.max_tool_messages)
+    )
+
+  @staticmethod
+  def _tool_calls(entry: MemoryEntry) -> list[dict[str, Any]]:
+    calls = entry.metadata.get("tool_calls")
+    return [call for call in calls if isinstance(call, dict)] if isinstance(calls, list) else []
+
+  @classmethod
+  def _is_complete_unit(cls, entries: list[MemoryEntry], start: int) -> bool:
+    entry = entries[start]
+    calls = cls._tool_calls(entry)
+    if entry.role != MemoryRole.ASSISTANT or not calls:
+      return True
+    expected = {
+      str(call.get("id") or call.get("tool_call_id"))
+      for call in calls if call.get("id") or call.get("tool_call_id")
+    }
+    actual: set[str] = set()
+    index = start + 1
+    while index < len(entries) and entries[index].role == MemoryRole.TOOL:
+      tool_call_id = entries[index].metadata.get("tool_call_id")
+      if tool_call_id:
+        actual.add(str(tool_call_id))
+      index += 1
+    return not expected or expected.issubset(actual)
+
+  @staticmethod
+  def _preview(content: str) -> str:
+    if len(content) <= 800:
+      return content
+    return f"{content[:360]}\n...[omitted]...\n{content[-360:]}"
+
+  @classmethod
+  def _ledger_items(cls, removed: list[MemoryEntry]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    call_args: dict[str, dict[str, Any]] = {}
+    for entry in removed:
+      if entry.role == MemoryRole.ASSISTANT:
+        for call in cls._tool_calls(entry):
+          call_id = str(call.get("id") or call.get("tool_call_id") or "")
+          function = call.get("function") if isinstance(call.get("function"), dict) else {}
+          args = function.get("arguments")
+          if isinstance(args, str):
+            try:
+              args = json.loads(args)
+            except json.JSONDecodeError:
+              args = {"raw": args[:500]}
+          call_args[call_id] = {
+            "tool": function.get("name"),
+            "arguments": args if isinstance(args, dict) else {},
+          }
+      elif entry.role == MemoryRole.TOOL:
+        call_id = str(entry.metadata.get("tool_call_id") or "")
+        item = dict(call_args.get(call_id, {}))
+        item.update({
+          "tool_call_id": call_id or None,
+          "artifact_ref": entry.metadata.get("artifact_ref"),
+          "exit_code": entry.metadata.get("exit_code"),
+          "workspace_changes": entry.metadata.get("workspace_changes"),
+          "result": cls._preview(entry.content),
+        })
+        items.append(item)
+      elif entry.role in {MemoryRole.USER, MemoryRole.ASSISTANT} and entry.content:
+        items.append({"role": entry.role.value, "content": cls._preview(entry.content)})
+    return items
+
+  async def compact(
+    self,
+    entries: list[MemoryEntry],
+    budget: ContextBudget,
+    count_tokens: Callable[[str], int],
+  ) -> ContextCompactionResult:
+    current = list(entries)
+    metrics = self._metrics(current)
+    if self._within(metrics, budget):
+      return ContextCompactionResult(current, metrics)
+
+    previous_ledgers = [
+      entry for entry in current if entry.metadata.get("evidence_ledger")
+    ]
+    current = [entry for entry in current if not entry.metadata.get("evidence_ledger")]
+    system_entries = [entry for entry in current if entry.role == MemoryRole.SYSTEM]
+    chat_entries = [entry for entry in current if entry.role != MemoryRole.SYSTEM]
+    latest_user = _latest_user_entry(chat_entries)
+    removed: list[MemoryEntry] = []
+
+    while chat_entries and not self._within(self._metrics(system_entries + chat_entries), budget):
+      start = 1 if chat_entries[0] is latest_user else 0
+      if start >= len(chat_entries) or not self._is_complete_unit(chat_entries, start):
+        break
+      removed.extend(_pop_protocol_unit(chat_entries, start))
+
+    ledger_source = previous_ledgers + removed
+    ledger_items: list[dict[str, Any]] = []
+    for entry in previous_ledgers:
+      _, _, payload = entry.content.partition("\n")
+      try:
+        prior = json.loads(payload)
+      except json.JSONDecodeError:
+        prior = []
+      if isinstance(prior, list):
+        ledger_items.extend(item for item in prior if isinstance(item, dict))
+    ledger_items.extend(self._ledger_items(removed))
+
+    if ledger_items:
+      while ledger_items:
+        ledger_text = "[Compacted evidence ledger]\n" + json.dumps(
+          ledger_items, ensure_ascii=False, separators=(",", ":"), default=str,
+        )
+        if len(ledger_text.encode("utf-8")) <= self._LEDGER_MAX_BYTES:
+          break
+        ledger_items.pop(0)
+      if ledger_items:
+        ledger = MemoryEntry(
+          role=MemoryRole.SYSTEM,
+          content=ledger_text,
+          tokens=count_tokens(ledger_text),
+          metadata={"evidence_ledger": True, "compacted_entries": len(removed)},
+        )
+        system_entries.append(ledger)
+
+    compacted = system_entries + chat_entries
+    metrics = self._metrics(compacted)
+    if not self._within(metrics, budget):
+      compacted = [entry for entry in compacted if not entry.metadata.get("evidence_ledger")]
+      metrics = self._metrics(compacted)
+    return ContextCompactionResult(
+      compacted,
+      metrics,
+      compacted_entries=len(removed),
+      exceeded=not self._within(metrics, budget),
+    )
 
 
 @runtime_checkable
@@ -149,12 +340,14 @@ class WorkingMemory:
     max_tokens: int = 8192,
     summary_llm: "Any | None" = None,
     token_counter: "callable[[str], int] | None" = None,
+    context_compactor: ContextCompactor | None = None,
   ):
     self.session_id = session_id
     self.backend = memory_backend
     self.max_tokens = max_tokens
     self.summary_llm = summary_llm
     self._token_counter = token_counter or _default_count_tokens
+    self.context_compactor = context_compactor or ProtocolAwareContextCompactor()
     self.entries: list[MemoryEntry] = []
 
     # Safe background-write bookkeeping: each backend.add() is wrapped in
@@ -169,6 +362,13 @@ class WorkingMemory:
     """Evict oldest non-system entries until we are under ``max_tokens``."""
     total = sum(e.tokens for e in self.entries)
     if total <= self.max_tokens:
+      return
+
+    if self.summary_llm is None:
+      result = await self.context_compactor.compact(
+        list(self.entries), ContextBudget(max_tokens=self.max_tokens), self._count_tokens,
+      )
+      self.entries = result.entries
       return
 
     system_entries = [e for e in self.entries if e.role == MemoryRole.SYSTEM]
@@ -285,14 +485,41 @@ class WorkingMemory:
       self._pending_tasks.add(task)
       task.add_done_callback(self._pending_tasks.discard)
 
-  async def enforce_budget(self) -> None:
+  async def enforce_budget(self, runtime_limits: Any | None = None) -> ContextMetrics | None:
     """Apply context trimming after callers append an atomic message batch.
 
     ReAct uses this after all results for one assistant tool-call message have
     been recorded.  It prevents a large early result from evicting the parent
     assistant message before later sibling results are appended.
     """
-    await self._enforce_budget()
+    if runtime_limits is None:
+      await self._enforce_budget()
+      return None
+
+    budget = ContextBudget(
+      max_bytes=getattr(runtime_limits, "max_context_bytes", None),
+      max_tokens=getattr(runtime_limits, "max_context_tokens", None) or self.max_tokens,
+      max_tool_messages=getattr(runtime_limits, "max_tool_messages", None),
+    )
+    result = await self.context_compactor.compact(
+      list(self.entries), budget, self._count_tokens,
+    )
+    self.entries = result.entries
+    if result.exceeded:
+      from nonoka.core.errors import ContextBudgetExceeded
+      raise ContextBudgetExceeded(
+        metrics={
+          "bytes": result.metrics.serialized_bytes,
+          "tokens": result.metrics.tokens,
+          "tool_messages": result.metrics.tool_messages,
+        },
+        limits={
+          "max_bytes": budget.max_bytes,
+          "max_tokens": budget.max_tokens,
+          "max_tool_messages": budget.max_tool_messages,
+        },
+      )
+    return result.metrics
 
   async def _safe_backend_add(self, content: str, metadata: dict[str, Any]) -> None:
     """Wrap backend.add() so exceptions are logged, not swallowed."""
