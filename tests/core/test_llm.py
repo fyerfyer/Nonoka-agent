@@ -109,6 +109,22 @@ async def test_litellm_provider_retries_transient_error_then_succeeds():
 
 
 @pytest.mark.asyncio
+async def test_litellm_provider_preserves_model_dump_usage():
+  provider = LiteLLMProvider(model="test")
+  fake_response = MagicMock()
+  fake_response.choices = [MagicMock()]
+  fake_response.choices[0].message = MagicMock(content="hi", tool_calls=None)
+  fake_response.usage.model_dump.return_value = {"prompt_tokens": 2, "completion_tokens": 3}
+
+  with patch("nonoka.core.llm.litellm.acompletion", AsyncMock(return_value=fake_response)), patch(
+    "nonoka.core.llm.litellm.completion_cost", return_value=0.01,
+  ):
+    result = await provider.chat([LLMMessage(role="user", content="hello")])
+
+  assert result.usage == {"prompt_tokens": 2, "completion_tokens": 3, "estimated_cost_usd": 0.01}
+
+
+@pytest.mark.asyncio
 async def test_litellm_provider_respects_timeout():
   """Provider should pass timeout through to asyncio.wait_for."""
   provider = LiteLLMProvider(

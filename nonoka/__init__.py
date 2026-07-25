@@ -78,6 +78,15 @@ from nonoka.core.external_skill import (
 )
 from nonoka.skills import Skill, SkillLoader, SkillRegistry
 from nonoka.tools import load_skill
+from nonoka.observability import (
+  EventStore,
+  ObservabilityPipeline,
+  RunEvent,
+  SQLiteEventStore,
+  TelemetryExporter,
+  UsageSummary,
+)
+from nonoka.safety import SafetyPolicy
 
 __all__ = [
   # Core
@@ -148,6 +157,13 @@ __all__ = [
   "ContextBudget",
   "ContextCompactor",
   "ContextMetrics",
+  "EventStore",
+  "ObservabilityPipeline",
+  "RunEvent",
+  "SQLiteEventStore",
+  "TelemetryExporter",
+  "UsageSummary",
+  "SafetyPolicy",
   "ProtocolAwareContextCompactor",
   "ExternalMCPRegistry",
   "ExternalMCPServer",

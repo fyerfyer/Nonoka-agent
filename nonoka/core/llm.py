@@ -321,7 +321,21 @@ class LiteLLMProvider:
             for tc in choice.tool_calls
           ]
 
-        usage_dict = dict(response.usage) if hasattr(response, "usage") and response.usage else {}
+        raw_usage = getattr(response, "usage", None)
+        if hasattr(raw_usage, "model_dump"):
+          usage_dict = raw_usage.model_dump(exclude_none=True)
+        elif hasattr(raw_usage, "dict"):
+          usage_dict = raw_usage.dict(exclude_none=True)
+        elif raw_usage:
+          usage_dict = dict(raw_usage)
+        else:
+          usage_dict = {}
+        # LiteLLM knows provider-specific pricing.  Cost failures must remain
+        # observable as unknown rather than being reported as free.
+        try:
+          usage_dict["estimated_cost_usd"] = float(litellm.completion_cost(completion_response=response))
+        except Exception:
+          usage_dict["estimated_cost_usd"] = None
 
         return LLMResponse(
           content=choice.content,

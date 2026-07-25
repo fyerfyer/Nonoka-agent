@@ -82,6 +82,8 @@ class Runner:
     circuit_breaker: CircuitBreaker | None = None,
     hooks: Hooks | None = None,
     gateway: Any | None = None,
+    event_store: Any | None = None,
+    observability: Any | None = None,
   ):
     # LLM providers are cached per-model and created lazily on first use.
     self._llm_cache: dict[str, LiteLLMProvider] = {}
@@ -97,6 +99,16 @@ class Runner:
 
     # 4. Hooks / middleware
     self.hooks = hooks or Hooks()
+    if observability is not None and event_store is not None:
+      raise ValueError("Pass observability or event_store, not both")
+    self.observability = observability or event_store
+    self.event_store = event_store  # Backward-compatible attribute.
+    if self.observability is not None:
+      # Add telemetry listeners without replacing user-provided hooks.
+      from nonoka.observability import ObservabilityHooks
+      observers = ObservabilityHooks(self.observability)
+      for point, listeners in observers._store.items():
+        self.hooks._store.setdefault(point, []).extend(listeners)
 
     # 5. Optional Gateway(s) for reverse-channel (Agent-initiated push)
     self._gateways: list[Any] = []

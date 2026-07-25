@@ -163,6 +163,47 @@ result = await Runner().run_react(agent, "Inspect and fix the service", deps=Non
 print(result.trace["termination"])
 ```
 
+## Production observability
+
+`Runner` can persist redacted prompts, responses, tool I/O, errors, token
+usage, and LiteLLM cost estimates. OpenTelemetry spans are emitted for runs,
+model requests, and tool calls when an SDK tracer provider is configured.
+
+```python
+from nonoka import ObservabilityPipeline, Runner, SQLiteEventStore
+
+pipeline = ObservabilityPipeline(
+    SQLiteEventStore(".nonoka/events.db"),
+    exporters=[my_exporter],  # Langfuse, OTLP, or another TelemetryExporter
+)
+runner = Runner(observability=pipeline)
+```
+
+Exporters are optional and best-effort, so a telemetry backend outage does not
+interrupt agent execution.
+
+## ASGI service and safety policy
+
+The authenticated FastAPI service exposes `/run`, streaming `/chat`, `/tasks`,
+`/health`, and Prometheus-compatible `/metrics` endpoints:
+
+```bash
+export NONOKA_API_TOKEN="replace-with-a-long-random-token"
+uvicorn nonoka.server.app:create_app --factory --host 0.0.0.0 --port 8000
+```
+
+Filesystem and command checks can also be reused by hosts before executing a
+tool:
+
+```python
+from pathlib import Path
+from nonoka import SafetyPolicy
+
+policy = SafetyPolicy(allowed_roots=[Path.cwd()])
+policy.check_path("src/app.py")
+decision = policy.check_command("pytest -q")  # "allow" or "approval"
+```
+
 ## Optional loop extensions
 
 The default loop retains its conservative tool scheduler and progress guard.
