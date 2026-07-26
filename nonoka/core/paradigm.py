@@ -166,17 +166,27 @@ class ReActAgent:
             value for value in (model_timeout, remaining) if value is not None
           ) if model_timeout is not None or remaining is not None else None
           if effective_timeout is None:
-            response = await runner.llm.chat(
+            complete = getattr(type(runner), "complete", None)
+            response = await (runner.complete(
               messages=messages, tools=tools or None,
               temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
-            )
+            ) if complete is not None else runner.llm.chat(
+              messages=messages, tools=tools or None,
+              temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
+            ))
           else:
             with anyio.fail_after(effective_timeout):
-              response = await runner.llm.chat(
+              complete = getattr(type(runner), "complete", None)
+              response = await (runner.complete(
                 messages=messages, tools=tools or None,
                 temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
-              )
+              ) if complete is not None else runner.llm.chat(
+                messages=messages, tools=tools or None,
+                temperature=session.agent.temperature, max_tokens=session.agent.max_tokens,
+              ))
           await runner.hooks.emit_llm_response(hook_ctx, response)
+          if getattr(type(runner), "record_llm_usage", None) is not None:
+            await runner.record_llm_usage(session, response.usage, cache_hit=bool(response.usage.pop("_cache_hit", False)))
         except TimeoutError as exc:
           deadline_limited = remaining is not None and (
             model_timeout is None or remaining <= model_timeout
@@ -900,6 +910,7 @@ class ReActAgent:
         accumulated_content = ""
         accumulated_tool_calls: dict[int, dict[str, Any]] = {}
         reported_tool_argument_chars: dict[int, int] = {}
+        streamed_usage: dict[str, Any] = {}
 
         # Hook: llm request (streaming)
         hook_ctx = HookContext(session=session, runner=runner)
@@ -936,6 +947,8 @@ class ReActAgent:
           timeout_scope = anyio.fail_after(effective_timeout) if effective_timeout is not None else None
           if timeout_scope is None:
             async for chunk in stream:
+              if chunk.usage:
+                streamed_usage.update(chunk.usage)
               if chunk.content_delta:
                 accumulated_content += chunk.content_delta
                 yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
@@ -950,6 +963,8 @@ class ReActAgent:
           else:
             with timeout_scope:
               async for chunk in stream:
+                if chunk.usage:
+                  streamed_usage.update(chunk.usage)
                 if chunk.content_delta:
                   accumulated_content += chunk.content_delta
                   yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
@@ -982,11 +997,14 @@ class ReActAgent:
         response = LLMResponse(
           content=accumulated_content or None,
           tool_calls=tool_calls or None,
+          usage=streamed_usage,
         )
         session.trace.record_turn_response(turn + 1, response.model_dump())
 
         # Hook: llm response (streaming)
         await runner.hooks.emit_llm_response(hook_ctx, response)
+        if getattr(type(runner), "record_llm_usage", None) is not None:
+          await runner.record_llm_usage(session, response.usage)
 
         _logger.info(
           "llm.stream_response",

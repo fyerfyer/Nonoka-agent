@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import uuid
 import weakref
 from collections.abc import AsyncIterator
-from typing import Any, TypeVar
+from typing import Any, Callable, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -84,12 +85,25 @@ class Runner:
     gateway: Any | None = None,
     event_store: Any | None = None,
     observability: Any | None = None,
+    response_cache: Any | None = None,
+    cache_ttl_seconds: int = 604800,
+    semantic_cache: Any | None = None,
+    semantic_embedder: Any | None = None,
+    semantic_threshold: float = 0.92,
+    cache_namespace: str | Callable[[], str | None] = "default",
   ):
     # LLM providers are cached per-model and created lazily on first use.
     self._llm_cache: dict[str, LiteLLMProvider] = {}
 
     # Optional circuit breaker shared across all providers created by this runner.
     self._circuit_breaker = circuit_breaker
+    self.response_cache = response_cache
+    self.cache_ttl_seconds = cache_ttl_seconds
+    self.semantic_cache = semantic_cache
+    self.semantic_embedder = semantic_embedder
+    self.semantic_threshold = semantic_threshold
+    self.cache_namespace = cache_namespace
+    self._cache_flights: dict[str, asyncio.Future[Any]] = {}
 
     # 2. Checkpoint store (default: SQLite persistent)
     self.checkpoint_store = self._resolve_checkpoint(checkpoint)
@@ -182,6 +196,102 @@ class Runner:
       timeout=agent.default_timeout,
       circuit_breaker=self._circuit_breaker,
     )
+
+  async def record_llm_usage(
+    self,
+    session: Session,
+    usage: dict[str, Any] | None,
+    *,
+    cache_hit: bool = False,
+  ) -> None:
+    """Record usage once, then expose it through a first-class hook.
+
+    Providers are intentionally not allowed to mutate runtime usage directly:
+    this keeps accounting identical for streamed, non-streamed and future
+    cached completions.
+    """
+    normalized = dict(usage or {})
+    normalized["cache_hit"] = cache_hit
+    session.record_model_usage(normalized, cache_hit=cache_hit)
+    await self.hooks.emit_llm_usage(HookContext(session=session, runner=self), normalized)
+
+  async def complete(
+    self, *, messages: list[Any], tools: list[dict[str, Any]] | None,
+    temperature: float | None, max_tokens: int | None,
+  ) -> Any:
+    """Run a cache-safe completion through a single-flight exact cache."""
+    provider = self.llm
+    if provider is None:
+      raise RuntimeError("Runner LLM has not been initialized")
+    eligible = self.response_cache is not None and not tools and not any(
+      str(getattr(message, "role", "")) == "LLMMessageRole.TOOL" or str(getattr(message, "role", "")) == "tool"
+      for message in messages
+    )
+    if not eligible:
+      return await provider.chat(messages=messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+    namespace = self.cache_namespace() if callable(self.cache_namespace) else self.cache_namespace
+    # A scope resolver may deliberately return None when its workspace no
+    # longer has a trustworthy revision fingerprint.  Exact matching remains
+    # safe; semantic reuse is disabled for that turn.
+    namespace = namespace or "default"
+    from nonoka.core.cache import canonical_response_key
+    key = canonical_response_key(model=provider.model, messages=messages, tools=tools,
+      temperature=temperature, max_tokens=max_tokens, namespace=namespace)
+    hit = await self.response_cache.get(key)
+    if hit is not None:
+      hit.usage["_cache_hit"] = True
+      hit.usage["_cache_source"] = "exact"
+      return hit
+    semantic_vector = None
+    if self.semantic_cache is not None and self.semantic_embedder is not None and namespace != "default" and temperature in (None, 0):
+      from nonoka.core.cache import semantic_cache_query, semantic_cache_variant
+      query = semantic_cache_query(messages)
+      if query is None:
+        # A multi-turn exchange has hidden conversational state. Exact cache
+        # remains available, but semantic reuse would be unsound here.
+        query = None
+      try:
+        if query is not None:
+          semantic_vector = await self.semantic_embedder.embed(query)
+          semantic_hit = await self.semantic_cache.get(
+            semantic_vector, model=provider.model, scope=namespace,
+            variant=semantic_cache_variant(model=provider.model, temperature=temperature, max_tokens=max_tokens),
+            threshold=self.semantic_threshold,
+          )
+          if semantic_hit is not None:
+            semantic_hit.usage["_cache_hit"] = True
+            semantic_hit.usage["_semantic_cache_hit"] = True
+            semantic_hit.usage["_cache_source"] = "semantic"
+            return semantic_hit
+      except Exception:
+        # Semantic caching is an optional cost optimization, never an LLM availability dependency.
+        semantic_vector = None
+    flight = self._cache_flights.get(key)
+    if flight is not None:
+      return await flight
+    flight = asyncio.get_running_loop().create_future()
+    self._cache_flights[key] = flight
+    try:
+      response = await provider.chat(messages=messages, tools=tools, temperature=temperature, max_tokens=max_tokens)
+      if not response.tool_calls:
+        await self.response_cache.put(key, response, self.cache_ttl_seconds)
+        if semantic_vector is not None:
+          try:
+            await self.semantic_cache.put(
+              semantic_vector, response, model=provider.model, scope=namespace,
+              variant=semantic_cache_variant(model=provider.model, temperature=temperature, max_tokens=max_tokens),
+              ttl_seconds=self.cache_ttl_seconds,
+            )
+          except Exception:
+            # A cache write must never turn a successful provider response into an error.
+            pass
+      flight.set_result(response)
+      return response
+    except BaseException as exc:
+      flight.set_exception(exc)
+      raise
+    finally:
+      self._cache_flights.pop(key, None)
 
   # ------------------------------------------------------------------ #
   # Backend resolution helpers

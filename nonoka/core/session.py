@@ -130,6 +130,9 @@ class Session:
       max_context_tokens=configured.max_context_tokens,
       max_tool_messages=configured.max_tool_messages,
       max_external_result_bytes=configured.max_external_result_bytes,
+      max_total_tokens=configured.max_total_tokens,
+      max_cost_usd=configured.max_cost_usd,
+      fail_on_unknown_cost=configured.fail_on_unknown_cost,
     )
     self.runtime_state = SessionRuntimeState.create(effective_limits)
     self.completion_contract = agent.completion_contract
@@ -218,6 +221,66 @@ class Session:
     usage.model_turns += 1
     self.turn_count = usage.model_turns
     return usage.model_turns
+
+  def record_model_usage(self, usage_data: dict[str, Any], *, cache_hit: bool = False) -> None:
+    """Persist provider-normalized usage and enforce cumulative task budgets.
+
+    This is intentionally owned by Session rather than a provider callback so
+    checkpoint/resume and hook-based observability see one authoritative value.
+    """
+    from nonoka.core.errors import RuntimeTerminatedError
+
+    usage = self.runtime_state.usage
+    input_tokens = int(usage_data.get("input_tokens") or usage_data.get("prompt_tokens") or 0)
+    output_tokens = int(usage_data.get("output_tokens") or usage_data.get("completion_tokens") or 0)
+    total_tokens = int(usage_data.get("total_tokens") or input_tokens + output_tokens)
+    raw_cost = usage_data.get("estimated_cost_usd")
+    cost = float(raw_cost) if raw_cost is not None else None
+
+    if cache_hit:
+      usage.cache_hits += 1
+      usage.cache_saved_tokens += total_tokens
+      if cost is not None:
+        usage.cache_saved_cost_usd += cost
+      return
+
+    usage.input_tokens += input_tokens
+    usage.output_tokens += output_tokens
+    usage.total_tokens += total_tokens
+    if cost is not None:
+      usage.cost_usd += cost
+
+    limits = self.runtime_state.limits
+    if limits.max_cost_usd is not None and cost is None and limits.fail_on_unknown_cost:
+      termination = Termination(
+        reason=TerminalReason.COST_UNAVAILABLE,
+        message="Model provider did not return a price while a hard cost budget is configured.",
+        dimension="max_cost_usd",
+        limit=limits.max_cost_usd,
+        used=usage.cost_usd,
+      )
+      self.terminate(termination)
+      raise RuntimeTerminatedError(termination)
+    if limits.max_total_tokens is not None and usage.total_tokens > limits.max_total_tokens:
+      termination = Termination(
+        reason=TerminalReason.TOKEN_BUDGET_EXHAUSTED,
+        message=f"Session {self.session_id} exhausted its total token budget.",
+        dimension="max_total_tokens",
+        limit=limits.max_total_tokens,
+        used=usage.total_tokens,
+      )
+      self.terminate(termination)
+      raise RuntimeTerminatedError(termination)
+    if limits.max_cost_usd is not None and usage.cost_usd > limits.max_cost_usd:
+      termination = Termination(
+        reason=TerminalReason.COST_BUDGET_EXHAUSTED,
+        message=f"Session {self.session_id} exhausted its cost budget.",
+        dimension="max_cost_usd",
+        limit=limits.max_cost_usd,
+        used=usage.cost_usd,
+      )
+      self.terminate(termination)
+      raise RuntimeTerminatedError(termination)
 
   def reserve_tool_calls(self, count: int, *, external_count: int = 0, last_tool: str | None = None) -> None:
     """Reserve a model-selected tool batch before local or host execution."""

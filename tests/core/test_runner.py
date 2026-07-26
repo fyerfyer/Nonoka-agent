@@ -7,7 +7,7 @@ from nonoka.core.agent import Agent
 from nonoka.core.tool import tool
 from nonoka.core.types import RetryPolicy
 from nonoka.core.runner import Runner, StreamEvent
-from nonoka.core.llm import LLMResponse, LLMStreamChunk
+from nonoka.core.llm import LLMMessage, LLMResponse, LLMStreamChunk
 from nonoka.backends.checkpoint.memory import MemoryCheckpointStore
 
 
@@ -104,6 +104,105 @@ async def test_runner_forwards_agent_generation_config_to_react_provider():
   provider.chat.assert_awaited_once()
   assert provider.chat.call_args.kwargs["temperature"] == 0.0
   assert provider.chat.call_args.kwargs["max_tokens"] == 123
+
+
+class _EmptyResponseCache:
+  async def get(self, key):
+    return None
+
+  async def put(self, key, response, ttl_seconds):
+    return None
+
+
+class _SemanticCacheHit:
+  def __init__(self):
+    self.calls = []
+
+  async def get(self, vector, **kwargs):
+    self.calls.append((vector, kwargs))
+    return LLMResponse(content="semantic answer", usage={"_semantic_similarity_score": 0.97})
+
+  async def put(self, *args, **kwargs):
+    raise AssertionError("a semantic hit must not be rewritten")
+
+
+class _Embedder:
+  def __init__(self):
+    self.queries = []
+
+  async def embed(self, query):
+    self.queries.append(query)
+    return [1.0, 0.0]
+
+
+@pytest.mark.asyncio
+async def test_runner_semantic_cache_hit_is_limited_to_stateless_request():
+  semantic_cache = _SemanticCacheHit()
+  embedder = _Embedder()
+  runner = Runner(
+    response_cache=_EmptyResponseCache(), semantic_cache=semantic_cache,
+    semantic_embedder=embedder, cache_namespace="semantic-v2:repo-state",
+  )
+  provider = MagicMock(model="test-model")
+  provider.chat = AsyncMock()
+  runner.llm = provider
+
+  result = await runner.complete(
+    messages=[LLMMessage(role="system", content="stable instructions"), LLMMessage(role="user", content="Summarize this file")],
+    tools=None, temperature=0, max_tokens=256,
+  )
+
+  assert result.content == "semantic answer"
+  assert result.usage["_cache_source"] == "semantic"
+  assert result.usage["_semantic_cache_hit"] is True
+  assert embedder.queries == ["Summarize this file"]
+  provider.chat.assert_not_awaited()
+  assert semantic_cache.calls[0][1]["scope"] == "semantic-v2:repo-state"
+
+
+@pytest.mark.asyncio
+async def test_runner_never_semantically_reuses_multiturn_conversation():
+  semantic_cache = _SemanticCacheHit()
+  embedder = _Embedder()
+  runner = Runner(
+    response_cache=_EmptyResponseCache(), semantic_cache=semantic_cache,
+    semantic_embedder=embedder, cache_namespace="semantic-v2:repo-state",
+  )
+  provider = MagicMock(model="test-model")
+  provider.chat = AsyncMock(return_value=LLMResponse(content="fresh"))
+  runner.llm = provider
+
+  result = await runner.complete(
+    messages=[LLMMessage(role="user", content="First request"), LLMMessage(role="assistant", content="Earlier answer"), LLMMessage(role="user", content="Follow-up")],
+    tools=None, temperature=0, max_tokens=256,
+  )
+
+  assert result.content == "fresh"
+  assert embedder.queries == []
+  assert semantic_cache.calls == []
+  provider.chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runner_recomputes_semantic_scope_for_each_completion():
+  semantic_cache = _SemanticCacheHit()
+  embedder = _Embedder()
+  scopes = iter(["semantic-v2:before-edit", "semantic-v2:after-edit"])
+  runner = Runner(
+    response_cache=_EmptyResponseCache(), semantic_cache=semantic_cache,
+    semantic_embedder=embedder, cache_namespace=lambda: next(scopes),
+  )
+  provider = MagicMock(model="test-model")
+  provider.chat = AsyncMock()
+  runner.llm = provider
+  messages = [LLMMessage(role="user", content="Summarize this file")]
+
+  await runner.complete(messages=messages, tools=None, temperature=0, max_tokens=256)
+  await runner.complete(messages=messages, tools=None, temperature=0, max_tokens=256)
+
+  assert [call[1]["scope"] for call in semantic_cache.calls] == [
+    "semantic-v2:before-edit", "semantic-v2:after-edit",
+  ]
 
 
 # --------------------------------------------------------------------------- #

@@ -48,6 +48,7 @@ class LLMStreamChunk(BaseModel):
   content_delta: str | None = None
   tool_call_deltas: list[dict[str, Any]] | None = None
   finish_reason: str | None = None
+  usage: dict[str, Any] | None = None
 
 
 # ------------------------------------------------------------------ #
@@ -247,6 +248,9 @@ class LiteLLMProvider:
     litellm_msgs = [m.model_dump(exclude_none=True) for m in messages]
     call_kwargs = self._build_call_kwargs(litellm_msgs, tools, temperature, max_tokens)
     call_kwargs["stream"] = True
+    # OpenAI-compatible providers return usage in a final, otherwise empty,
+    # stream frame when this option is set.
+    call_kwargs.setdefault("stream_options", {"include_usage": True})
 
     try:
       stream = await litellm.acompletion(**call_kwargs)
@@ -255,8 +259,19 @@ class LiteLLMProvider:
       raise
 
     async for part in stream:
+      raw_usage = getattr(part, "usage", None)
+      if hasattr(raw_usage, "model_dump"):
+        usage = raw_usage.model_dump(exclude_none=True)
+      elif hasattr(raw_usage, "dict"):
+        usage = raw_usage.dict(exclude_none=True)
+      elif raw_usage:
+        usage = dict(raw_usage)
+      else:
+        usage = None
       delta = part.choices[0].delta if hasattr(part, "choices") and part.choices else None
       if delta is None:
+        if usage:
+          yield LLMStreamChunk(usage=usage)
         continue
 
       content_delta = getattr(delta, "content", None)
@@ -276,6 +291,7 @@ class LiteLLMProvider:
         content_delta=content_delta,
         tool_call_deltas=tool_deltas,
         finish_reason=finish,
+        usage=usage,
       )
 
   def count_tokens(self, messages: list[LLMMessage] | str) -> int:

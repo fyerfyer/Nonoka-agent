@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from collections.abc import AsyncIterator
 from typing import Any, Awaitable, Callable
 
 
@@ -93,3 +94,48 @@ class ToolExecutionCoordinator:
         results[call_index] = value
       index = end
     return results
+
+  async def execute_stream(
+    self,
+    calls: list[dict[str, Any]],
+    capability_for: Callable[[dict[str, Any]], Any | None],
+    invoke: Callable[[dict[str, Any]], Awaitable[Any]],
+  ) -> AsyncIterator[tuple[int, Any]]:
+    """Yield each result as soon as its deterministic execution wave permits.
+
+    Read-only calls in a wave are yielded in completion order. Stateful calls
+    still form one-call waves, so no write can overtake a preceding action.
+    Consumers that need source-order storage can retain the returned index.
+    """
+    index = 0
+    while index < len(calls):
+      capability = capability_for(calls[index])
+      if not execution_for(capability).parallel_safe:
+        try:
+          yield index, await invoke(calls[index])
+        except BaseException as exc:
+          yield index, exc
+        index += 1
+        continue
+
+      end = index + 1
+      while end < len(calls) and execution_for(capability_for(calls[end])).parallel_safe:
+        end += 1
+      sem = asyncio.Semaphore(self.max_concurrency)
+
+      async def run_one(call_index: int) -> tuple[int, Any]:
+        async with sem:
+          try:
+            return call_index, await invoke(calls[call_index])
+          except BaseException as exc:
+            return call_index, exc
+
+      tasks = [asyncio.create_task(run_one(i)) for i in range(index, end)]
+      try:
+        for future in asyncio.as_completed(tasks):
+          yield await future
+      finally:
+        for task in tasks:
+          if not task.done():
+            task.cancel()
+      index = end

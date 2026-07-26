@@ -56,6 +56,7 @@ SessionStartHook = Callable[["HookContext"], Awaitable[None] | None]
 SessionEndHook = Callable[["HookContext", "RunResult"], Awaitable[None] | None]
 LLMRequestHook = Callable[["HookContext", list["LLMMessage"], list[dict[str, Any]] | None], Awaitable[None] | None]
 LLMResponseHook = Callable[["HookContext", "LLMResponse"], Awaitable[None] | None]
+LLMUsageHook = Callable[["HookContext", dict[str, Any]], Awaitable[None] | None]
 ToolStartHook = Callable[["HookContext", str, dict[str, Any]], Awaitable[None] | None]
 ToolStartInterceptHook = Callable[["HookContext", str, dict[str, Any]], Awaitable[dict[str, Any]] | dict[str, Any]]
 ToolEndHook = Callable[["HookContext", str, dict[str, Any], Any, Exception | None], Awaitable[None] | None]
@@ -138,6 +139,7 @@ class Hooks:
     "on_session_end",
     "on_llm_request",
     "on_llm_response",
+    "on_llm_usage",
     "on_tool_start",
     "on_tool_start_intercept",
     "on_tool_end",
@@ -152,6 +154,7 @@ class Hooks:
     on_session_end: SessionEndHook | list[SessionEndHook] | None = None,
     on_llm_request: LLMRequestHook | list[LLMRequestHook] | None = None,
     on_llm_response: LLMResponseHook | list[LLMResponseHook] | None = None,
+    on_llm_usage: LLMUsageHook | list[LLMUsageHook] | None = None,
     on_tool_start: ToolStartHook | list[ToolStartHook] | None = None,
     on_tool_start_intercept: ToolStartInterceptHook | list[ToolStartInterceptHook] | None = None,
     on_tool_end: ToolEndHook | list[ToolEndHook] | None = None,
@@ -261,6 +264,10 @@ class Hooks:
 
   async def emit_llm_response(self, ctx: HookContext, response: "LLMResponse") -> None:
     await _run_hooks(self._store.get("on_llm_response", []), ctx, response)
+
+  async def emit_llm_usage(self, ctx: HookContext, usage: dict[str, Any]) -> None:
+    """Emit normalized provider/cache usage after it is persisted to Session."""
+    await _run_hooks(self._store.get("on_llm_usage", []), ctx, usage)
 
   async def emit_tool_start(self, ctx: HookContext, tool_name: str, arguments: dict[str, Any]) -> None:
     await _run_hooks(self._store.get("on_tool_start", []), ctx, tool_name, arguments)

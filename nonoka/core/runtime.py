@@ -18,6 +18,9 @@ class TerminalReason(str, Enum):
   CANCELLED = "cancelled"
   COMPLETION_CONTRACT_UNMET = "completion_contract_unmet"
   EXECUTION_POLICY_VIOLATION = "execution_policy_violation"
+  TOKEN_BUDGET_EXHAUSTED = "token_budget_exhausted"
+  COST_BUDGET_EXHAUSTED = "cost_budget_exhausted"
+  COST_UNAVAILABLE = "cost_unavailable"
 
 
 class RuntimeLimits(BaseModel):
@@ -31,6 +34,9 @@ class RuntimeLimits(BaseModel):
   max_context_tokens: int | None = Field(default=None, ge=1)
   max_tool_messages: int | None = Field(default=None, ge=1)
   max_external_result_bytes: int | None = Field(default=None, ge=1)
+  max_total_tokens: int | None = Field(default=None, ge=1)
+  max_cost_usd: float | None = Field(default=None, gt=0)
+  fail_on_unknown_cost: bool = True
 
 
 class Termination(BaseModel):
@@ -48,6 +54,11 @@ class RuntimeUsage(BaseModel):
   external_tool_calls: int = 0
   input_tokens: int = 0
   output_tokens: int = 0
+  total_tokens: int = 0
+  cost_usd: float = 0.0
+  cache_hits: int = 0
+  cache_saved_tokens: int = 0
+  cache_saved_cost_usd: float = 0.0
   context_bytes: int = 0
   context_tokens: int = 0
   tool_messages: int = 0

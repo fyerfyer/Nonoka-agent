@@ -25,6 +25,9 @@ class UsageSummary:
   llm_calls: int = 0
   tool_calls: int = 0
   estimated_cost_usd: float | None = 0.0
+  cache_hits: int = 0
+  cache_saved_tokens: int = 0
+  cache_saved_cost_usd: float | None = 0.0
 
   @property
   def total_tokens(self) -> int:
@@ -230,10 +233,25 @@ class PostgresEventStore:
 
 def _summary_from_events(events: list[dict[str, Any]]) -> UsageSummary:
   summary = UsageSummary()
+  # ``llm.usage`` is emitted after cache normalization and is therefore the
+  # authoritative cost ledger.  Keep response-event fallback for databases
+  # written by older Nonoka versions.
+  has_usage_events = any(event["event_type"] == "llm.usage" for event in events)
   for event in events:
     payload = event["payload"]
-    if event["event_type"] == "llm.response":
-      usage = payload.get("usage") or {}
+    if event["event_type"] == "llm.usage" or (not has_usage_events and event["event_type"] == "llm.response"):
+      usage = payload.get("usage") if event["event_type"] == "llm.usage" else payload.get("usage")
+      usage = usage or {}
+      if usage.get("cache_hit"):
+        summary.cache_hits += 1
+        summary.cache_saved_tokens += int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        summary.cache_saved_tokens += int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        cost = usage.get("estimated_cost_usd")
+        if cost is None:
+          summary.cache_saved_cost_usd = None
+        elif summary.cache_saved_cost_usd is not None:
+          summary.cache_saved_cost_usd += float(cost)
+        continue
       summary.llm_calls += 1
       summary.input_tokens += int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
       summary.output_tokens += int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
@@ -305,6 +323,10 @@ class ObservabilityHooks(Hooks):
   async def on_llm_response(self, ctx, response) -> None:
     await self.store.append(ctx.session.session_id, "llm.response", {"content": response.content, "tool_calls": response.tool_calls, "usage": response.usage or {}})
     self._end_span(ctx, "nonoka.llm")
+
+  async def on_llm_usage(self, ctx, usage) -> None:
+    """Persist the post-cache accounting record without prompt content."""
+    await self.store.append(ctx.session.session_id, "llm.usage", {"usage": usage})
 
   async def on_tool_start(self, ctx, tool_name, arguments) -> None:
     span_name = f"nonoka.tool.{tool_name}"
