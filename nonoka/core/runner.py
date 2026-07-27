@@ -408,6 +408,30 @@ class Runner:
       result.trace = result.session.trace.to_dict()
     return result
 
+  @staticmethod
+  def _enrich_stream_event(session: Session, event: "StreamEvent") -> "StreamEvent":
+    """Attach redacted runtime evidence to terminal streaming events only."""
+    if event.type not in {"final", "error"}:
+      return event
+    termination = session.runtime_state.termination
+    if termination is not None:
+      event.data.setdefault("termination", termination.model_dump(mode="json"))
+    event.data.setdefault("runtime", session.runtime_state.model_dump(mode="json"))
+    completed_run = event.type == "error" or not (
+      event.data.get("requires_external_execution") or event.data.get("requires_approval")
+    )
+    if not completed_run:
+      return event
+    session.trace.finish(
+      success=bool(event.data.get("success", False)),
+      error_type=event.data.get("error_type"),
+      error=event.data.get("error"),
+    )
+    if termination is not None:
+      session.trace.termination.update(termination.model_dump(mode="json"))
+    event.data.setdefault("trace", session.trace.to_dict())
+    return event
+
   async def _inherit_memory(self, parent_session_id: str, session: Session) -> None:
     """Copy memory entries from a parent session into the child session."""
     parent_state = await self.checkpoint_store.load_session(parent_session_id)
@@ -425,7 +449,7 @@ class Runner:
     if not memory_entries:
       return
 
-    from nonoka.core.memory import MemoryEntry, MemoryRole
+    from nonoka.core.memory import MemoryEntry
     for entry_data in memory_entries:
       try:
         entry = MemoryEntry(**entry_data)
@@ -500,7 +524,7 @@ class Runner:
           result_success = False
           result_error = event.data.get("error")
           result_error_type = event.data.get("error_type")
-        yield event
+        yield self._enrich_stream_event(session, event)
     finally:
       result = RunResult(
         success=result_success,
@@ -543,7 +567,7 @@ class Runner:
           result_success = False
           result_error = event.data.get("error")
           result_error_type = event.data.get("error_type")
-        yield event
+        yield self._enrich_stream_event(session, event)
     finally:
       result = RunResult(
         success=result_success,
@@ -586,7 +610,7 @@ class Runner:
           result_success = False
           result_error = event.data.get("error")
           result_error_type = event.data.get("error_type")
-        yield event
+        yield self._enrich_stream_event(session, event)
     finally:
       result = RunResult(
         success=result_success,

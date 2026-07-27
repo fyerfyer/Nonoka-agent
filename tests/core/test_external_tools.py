@@ -356,6 +356,9 @@ async def test_run_stream_pauses_on_external_tool():
 
   types = [e.type for e in events]
   assert "tool_call_start" in types
+  final = next(event for event in events if event.type == "final")
+  assert "runtime" in final.data
+  assert "trace" not in final.data
   assert "final" in types
 
   final = next(e for e in events if e.type == "final")
@@ -484,6 +487,7 @@ async def test_resume_external_tools_injects_result_and_continues():
 
   final = next((e for e in events if e.type == "final"), None)
   assert final is not None
+  assert "trace" in final.data
   assert final.data.get("success") is True
 
 

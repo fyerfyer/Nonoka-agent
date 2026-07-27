@@ -30,7 +30,6 @@ from nonoka.core.errors import (
 )
 from nonoka.core.scheduler import _resolve_refs
 from nonoka.core.hooks import HookContext
-from nonoka.core.tool_response import unwrap_tool_response
 from nonoka.core.execution import ToolExecutionCoordinator, execution_for
 from nonoka.core.extensions import LoopExtension, LoopExtensionContext, LoopExtensionManager
 
@@ -482,12 +481,9 @@ class ReActAgent:
 
     # Find the last assistant message that contains pending tool_calls.
     pending_tool_calls: list[dict[str, Any]] = []
-    assistant_entry_index: int | None = None
-    for i in range(len(session.memory.entries) - 1, -1, -1):
-      entry = session.memory.entries[i]
+    for entry in reversed(session.memory.entries):
       if entry.role == MemoryRole.ASSISTANT and entry.metadata.get("tool_calls"):
         pending_tool_calls = list(entry.metadata["tool_calls"])
-        assistant_entry_index = i
         break
 
     if not pending_tool_calls:
@@ -947,8 +943,9 @@ class ReActAgent:
           timeout_scope = anyio.fail_after(effective_timeout) if effective_timeout is not None else None
           if timeout_scope is None:
             async for chunk in stream:
-              if chunk.usage:
-                streamed_usage.update(chunk.usage)
+              usage = getattr(chunk, "usage", None)
+              if usage:
+                streamed_usage.update(usage)
               if chunk.content_delta:
                 accumulated_content += chunk.content_delta
                 yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
@@ -963,8 +960,9 @@ class ReActAgent:
           else:
             with timeout_scope:
               async for chunk in stream:
-                if chunk.usage:
-                  streamed_usage.update(chunk.usage)
+                usage = getattr(chunk, "usage", None)
+                if usage:
+                  streamed_usage.update(usage)
                 if chunk.content_delta:
                   accumulated_content += chunk.content_delta
                   yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
@@ -1372,7 +1370,7 @@ class ReActAgent:
             type="error",
             data={
               "success": False,
-              "error": f"Agent loop detected: tool was called repeatedly without meaningful progress.",
+              "error": "Agent loop detected: tool was called repeatedly without meaningful progress.",
               "error_type": "loop_detected",
             },
           )
