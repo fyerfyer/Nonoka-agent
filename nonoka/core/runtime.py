@@ -90,6 +90,15 @@ class RuntimeUsage(BaseModel):
   latest_partial_artifact_ref: str | None = None
   completion_warning_count: int = 0
   latest_completion_warning: str | None = None
+  verification_status: Literal["passed", "failed", "unavailable", "not_run"] = "not_run"
+  focused_verification_status: Literal["passed", "failed", "unavailable", "not_run"] = "not_run"
+  full_verification_status: Literal["passed", "failed", "unavailable", "not_run"] = "not_run"
+  verification_count: int = 0
+  latest_verification: dict[str, Any] | None = None
+  latest_verification_at_observation: int | None = None
+  last_passed_focused_at_observation: int | None = None
+  last_failed_focused_at_observation: int | None = None
+  last_unavailable_focused_at_observation: int | None = None
 
 
 class CompletionRule(BaseModel):
@@ -148,6 +157,41 @@ class CommandSucceededRule(CompletionRule):
     return f"run the verification command successfully: {self.command}"
 
 
+class VerificationPassedRule(CompletionRule):
+  """Require trustworthy focused verification after the latest task effect."""
+
+  kind: Literal["verification_passed"] = "verification_passed"
+  level: Literal["focused", "full"] = "focused"
+  after_latest_effect: bool = True
+
+  def unmet(self, usage: RuntimeUsage) -> str | None:
+    passed_at = (
+      usage.last_passed_focused_at_observation
+      if self.level == "focused"
+      else (
+        usage.latest_verification_at_observation
+        if usage.full_verification_status == "passed" else None
+      )
+    )
+    if passed_at is None:
+      status = (
+        usage.focused_verification_status
+        if self.level == "focused" else usage.full_verification_status
+      )
+      if status == "failed":
+        return f"repair the change and pass a {self.level} verification check"
+      if status == "unavailable":
+        return f"run an available, complete {self.level} verification check"
+      return f"run and pass a {self.level} verification check"
+    if (
+      self.after_latest_effect
+      and usage.last_effect_at_observation is not None
+      and passed_at <= usage.last_effect_at_observation
+    ):
+      return f"run and pass a fresh {self.level} verification check after the latest change"
+    return None
+
+
 class CompleteObservationRule(CompletionRule):
   """Require an exhaustive observation after the latest unresolved partial one."""
 
@@ -180,7 +224,8 @@ class CompleteObservationRule(CompletionRule):
 
 
 CompletionRuleType = Annotated[
-  WorkspaceMutationRule | ObservedEffectRule | PathsChangedRule | CommandSucceededRule | CompleteObservationRule,
+  WorkspaceMutationRule | ObservedEffectRule | PathsChangedRule | CommandSucceededRule
+  | VerificationPassedRule | CompleteObservationRule,
   Field(discriminator="kind"),
 ]
 
@@ -198,6 +243,7 @@ class CompletionContract(BaseModel):
   require_observed_effect: bool = False
   required_paths: tuple[str, ...] = ()
   verification_command: str | None = None
+  require_focused_verification: bool = False
   require_complete_observations: bool = False
   max_corrections: int = Field(default=1, ge=0)
   enforcement: Literal["strict", "advisory"] = "strict"
@@ -212,6 +258,8 @@ class CompletionContract(BaseModel):
       compiled.append(PathsChangedRule(paths=self.required_paths))
     if self.verification_command:
       compiled.append(CommandSucceededRule(command=self.verification_command))
+    if self.require_focused_verification:
+      compiled.append(VerificationPassedRule())
     if self.require_complete_observations:
       compiled.append(CompleteObservationRule())
     return tuple(compiled)

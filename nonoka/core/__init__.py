@@ -46,7 +46,16 @@ from .tool_response import (
   unwrap_tool_response,
 )
 from .system_prompts import SystemPromptTemplate
-from .external_tool import EffectAttestation, ExternalCapability, ExternalToolReceipt, ObservationCompleteness
+from .external_tool import (
+  EffectAttestation,
+  ExternalCapability,
+  ExternalToolReceipt,
+  ObservationCompleteness,
+  VerificationKind,
+  VerificationLevel,
+  VerificationReceipt,
+  VerificationStatus,
+)
 from .memory import ContextBudget, ContextCompactor, ContextMetrics, ProtocolAwareContextCompactor
 from .runtime import (
   CompletionContract,
@@ -57,6 +66,7 @@ from .runtime import (
   SessionRuntimeState,
   TerminalReason,
   Termination,
+  VerificationPassedRule,
 )
 
 __all__ = [
@@ -112,6 +122,10 @@ __all__ = [
   "ExternalToolReceipt",
   "EffectAttestation",
   "ObservationCompleteness",
+  "VerificationKind",
+  "VerificationLevel",
+  "VerificationReceipt",
+  "VerificationStatus",
   "CompletionContract",
   "CompleteObservationRule",
   "ObservedEffectRule",
@@ -120,6 +134,7 @@ __all__ = [
   "SessionRuntimeState",
   "TerminalReason",
   "Termination",
+  "VerificationPassedRule",
   "ContextBudget",
   "ContextCompactor",
   "ContextMetrics",

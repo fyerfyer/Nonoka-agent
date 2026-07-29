@@ -8,6 +8,7 @@ from nonoka.core.runtime import (
   ObservedEffectRule,
   PathsChangedRule,
   RuntimeUsage,
+  VerificationPassedRule,
   WorkspaceMutationRule,
 )
 from nonoka.core.session import Session
@@ -58,6 +59,7 @@ def test_completion_contract_rules_round_trip_through_json():
     PathsChangedRule(paths=("a", "b")),
     CommandSucceededRule(command="check"),
     CompleteObservationRule(),
+    VerificationPassedRule(),
   ))
 
   restored = CompletionContract.model_validate_json(contract.model_dump_json())
@@ -65,6 +67,34 @@ def test_completion_contract_rules_round_trip_through_json():
   assert isinstance(restored.rules[0], PathsChangedRule)
   assert isinstance(restored.rules[1], CommandSucceededRule)
   assert isinstance(restored.rules[2], CompleteObservationRule)
+  assert isinstance(restored.rules[3], VerificationPassedRule)
+
+
+def test_focused_verification_must_follow_latest_effect():
+  contract = CompletionContract(require_focused_verification=True)
+  usage = RuntimeUsage(
+    focused_verification_status="passed",
+    last_passed_focused_at_observation=2,
+    last_effect_at_observation=2,
+  )
+
+  assert contract.unmet_requirements(usage) == [
+    "run and pass a fresh focused verification check after the latest change"
+  ]
+
+  usage.last_passed_focused_at_observation = 3
+  assert contract.unmet_requirements(usage) == []
+
+
+def test_focused_verification_reports_failed_and_unavailable_states():
+  contract = CompletionContract(require_focused_verification=True)
+
+  assert "repair" in contract.unmet_requirements(RuntimeUsage(
+    focused_verification_status="failed"
+  ))[0]
+  assert "available" in contract.unmet_requirements(RuntimeUsage(
+    focused_verification_status="unavailable"
+  ))[0]
 
 
 def test_complete_observation_rule_requires_fresh_complete_evidence():

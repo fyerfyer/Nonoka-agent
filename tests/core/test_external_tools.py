@@ -10,6 +10,7 @@ from nonoka import (
   CompletionContract, EffectAttestation, ExternalCapability, ExternalToolReceipt,
   ObservationCompleteness, Runner, RuntimeLimits, ToolExecution,
   WorkspaceAttestation,
+  VerificationKind, VerificationLevel, VerificationReceipt, VerificationStatus,
 )
 from nonoka.core.agent import Agent
 from nonoka.core.context import RunContext
@@ -158,6 +159,70 @@ async def test_partial_external_receipt_runs_declared_read_only_fallback():
 
 
 @pytest.mark.asyncio
+async def test_host_verification_receipt_satisfies_focused_completion_rule():
+  external = _ExternalCapability(
+    "bash", "Run commands", {"type": "object", "properties": {"command": {"type": "string"}}},
+  )
+  agent = Agent(
+    model="gpt-4o",
+    tools=[external],
+    completion_contract=CompletionContract(require_focused_verification=True),
+  )
+  runner = Runner(checkpoint="memory", memory="disabled")
+  session = await runner._create_session(agent, deps=None, session_id="verified-external")
+  await session.memory.add("fix it", MemoryRole.USER)
+  await session.memory.add(
+    "",
+    MemoryRole.ASSISTANT,
+    tool_calls=[{
+      "id": "verify_call",
+      "function": {
+        "name": "bash",
+        "arguments": '{"command":"NONOKA_VERIFY=focused pytest -q tests/test_api.py"}',
+      },
+    }],
+  )
+  session.status = "paused"
+  await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
+  class _FinalLLM:
+    async def chat_stream(self, messages, tools=None, **_kwargs):
+      yield type("Chunk", (), {
+        "content_delta": "verified",
+        "tool_call_deltas": None,
+        "finish_reason": "stop",
+      })()
+
+  runner._llm_cache["gpt-4o"] = _FinalLLM()
+  events = []
+  async for event in runner.resume_external_tools(
+    agent,
+    deps=None,
+    session_id=session.session_id,
+    results={"verify_call": ExternalToolReceipt(
+      result="2 passed in 0.1s",
+      exit_code=0,
+      completeness=ObservationCompleteness.COMPLETE,
+      verification=VerificationReceipt(
+        status=VerificationStatus.PASSED,
+        level=VerificationLevel.FOCUSED,
+        kind=VerificationKind.TEST,
+        command="NONOKA_VERIFY=focused pytest -q tests/test_api.py",
+        cwd="/workspace",
+        exit_code=0,
+        completeness=ObservationCompleteness.COMPLETE,
+        collected_tests=2,
+      ),
+    )},
+  ):
+    events.append(event)
+
+  assert next(event for event in events if event.type == "final").data["success"] is True
+  state = await runner.checkpoint_store.load_session(session.session_id)
+  assert state.runtime_state.usage.focused_verification_status == "passed"
+
+
+@pytest.mark.asyncio
 async def test_mixed_local_and_external_calls_execute_local_before_host_pause():
   """A local result survives an external pause and is not sent to the host."""
   local = _LocalCapability()
@@ -260,6 +325,35 @@ def test_external_receipt_round_trips_observation_completeness():
   })
 
   assert receipt.completeness == ObservationCompleteness.COMPLETE
+
+
+def test_external_receipt_round_trips_verification():
+  receipt = ExternalToolReceipt.from_value({
+    "result": "2 passed",
+    "exit_code": 0,
+    "completeness": "complete",
+    "verification": {
+      "status": "passed",
+      "level": "focused",
+      "kind": "test",
+      "command": "pytest -q tests/test_api.py",
+      "cwd": "/workspace",
+      "exit_code": 0,
+      "completeness": "complete",
+      "collected_tests": 2,
+    },
+  })
+
+  assert receipt.verification == VerificationReceipt(
+    status=VerificationStatus.PASSED,
+    level=VerificationLevel.FOCUSED,
+    kind=VerificationKind.TEST,
+    command="pytest -q tests/test_api.py",
+    cwd="/workspace",
+    exit_code=0,
+    completeness=ObservationCompleteness.COMPLETE,
+    collected_tests=2,
+  )
 
 
 def test_legacy_truncated_receipt_maps_to_partial_observation():

@@ -25,6 +25,89 @@ class ObservationCompleteness(str, Enum):
   UNKNOWN = "unknown"
 
 
+class VerificationStatus(str, Enum):
+  """Outcome of a host-attested verification command."""
+
+  PASSED = "passed"
+  FAILED = "failed"
+  UNAVAILABLE = "unavailable"
+  NOT_RUN = "not_run"
+
+
+class VerificationLevel(str, Enum):
+  """Scope claimed by a verification command."""
+
+  FOCUSED = "focused"
+  FULL = "full"
+
+
+class VerificationKind(str, Enum):
+  """Broad, host-classified verification command family."""
+
+  TEST = "test"
+  BUILD = "build"
+  LINT = "lint"
+  TYPECHECK = "typecheck"
+  CUSTOM = "custom"
+
+
+@dataclass(frozen=True)
+class VerificationReceipt:
+  """Structured evidence produced by the host for a verification command."""
+
+  status: VerificationStatus
+  level: VerificationLevel = VerificationLevel.FOCUSED
+  kind: VerificationKind = VerificationKind.CUSTOM
+  command: str = ""
+  cwd: str = ""
+  exit_code: int | None = None
+  timed_out: bool = False
+  timeout_seconds: float | None = None
+  truncated: bool = False
+  completeness: ObservationCompleteness = ObservationCompleteness.UNKNOWN
+  collected_tests: int | None = None
+  summary: str | None = None
+  failure_summary: str | None = None
+  artifact_ref: str | None = None
+
+  @classmethod
+  def from_value(cls, value: "VerificationReceipt | dict[str, Any]") -> "VerificationReceipt":
+    if isinstance(value, cls):
+      return value
+    if not isinstance(value, dict):
+      raise TypeError("verification receipt must be a mapping")
+    return cls(
+      status=VerificationStatus(value.get("status", VerificationStatus.NOT_RUN)),
+      level=VerificationLevel(value.get("level", VerificationLevel.FOCUSED)),
+      kind=VerificationKind(value.get("kind", VerificationKind.CUSTOM)),
+      command=str(value.get("command", "")),
+      cwd=str(value.get("cwd", "")),
+      exit_code=int(value["exit_code"]) if value.get("exit_code") is not None else None,
+      timed_out=bool(value.get("timed_out", False)),
+      timeout_seconds=(
+        float(value["timeout_seconds"])
+        if value.get("timeout_seconds") is not None else None
+      ),
+      truncated=bool(value.get("truncated", False)),
+      completeness=ObservationCompleteness(
+        value.get("completeness", ObservationCompleteness.UNKNOWN)
+      ),
+      collected_tests=(
+        int(value["collected_tests"])
+        if value.get("collected_tests") is not None else None
+      ),
+      summary=str(value["summary"]) if value.get("summary") is not None else None,
+      failure_summary=(
+        str(value["failure_summary"])
+        if value.get("failure_summary") is not None else None
+      ),
+      artifact_ref=(
+        str(value["artifact_ref"])
+        if value.get("artifact_ref") is not None else None
+      ),
+    )
+
+
 @dataclass(frozen=True)
 class EffectAttestation:
   """Host declaration that an external action changed task-relevant state.
@@ -117,6 +200,7 @@ class ExternalToolReceipt:
   original_bytes: int | None = None
   truncated: bool = False
   completeness: ObservationCompleteness = ObservationCompleteness.UNKNOWN
+  verification: VerificationReceipt | None = None
 
   def __post_init__(self) -> None:
     # Preserve explicitly supplied completeness, while mapping receipts from
@@ -133,11 +217,13 @@ class ExternalToolReceipt:
     receipt_keys = {
       "workspace", "effect", "exit_code", "elapsed_seconds", "host", "artifact_ref",
       "output_kind", "original_bytes", "truncated", "completeness",
+      "verification",
     }
     if not isinstance(value, dict) or not receipt_keys & set(value):
       return cls(result=value)
     workspace = value.get("workspace")
     effect = value.get("effect")
+    verification = value.get("verification")
     return cls(
       result=value.get("result"),
       exit_code=value.get("exit_code"),
@@ -150,6 +236,10 @@ class ExternalToolReceipt:
       original_bytes=int(value["original_bytes"]) if value.get("original_bytes") is not None else None,
       truncated=bool(value.get("truncated", False)),
       completeness=ObservationCompleteness(value.get("completeness", ObservationCompleteness.UNKNOWN)),
+      verification=(
+        VerificationReceipt.from_value(verification)
+        if verification is not None else None
+      ),
     )
 
 

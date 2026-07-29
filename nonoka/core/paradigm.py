@@ -755,6 +755,63 @@ class ReActAgent:
         usage = session.runtime_state.usage
         usage.effect_count += 1
         usage.last_effect_at_observation = observation_index
+      if receipt is not None and receipt.verification is not None:
+        verification = receipt.verification
+        status = verification.status.value
+        trustworthy = (
+          verification.exit_code == 0
+          and not verification.timed_out
+          and not verification.truncated
+          and verification.completeness == ObservationCompleteness.COMPLETE
+          and (
+            verification.kind.value != "test"
+            or (
+              verification.collected_tests is not None
+              and verification.collected_tests > 0
+            )
+          )
+        )
+        if status == "passed" and not trustworthy:
+          status = "unavailable"
+        elif verification.timed_out or verification.exit_code is None:
+          status = "unavailable"
+        elif verification.exit_code != 0:
+          status = "failed"
+
+        verification_data = {
+          "status": status,
+          "level": verification.level.value,
+          "kind": verification.kind.value,
+          "command": verification.command,
+          "cwd": verification.cwd,
+          "exit_code": verification.exit_code,
+          "timed_out": verification.timed_out,
+          "timeout_seconds": verification.timeout_seconds,
+          "truncated": verification.truncated,
+          "completeness": verification.completeness.value,
+          "collected_tests": verification.collected_tests,
+          "summary": verification.summary,
+          "failure_summary": verification.failure_summary,
+          "artifact_ref": verification.artifact_ref,
+        }
+        usage = session.runtime_state.usage
+        usage.verification_count += 1
+        usage.verification_status = status
+        usage.latest_verification = verification_data
+        usage.latest_verification_at_observation = observation_index
+        if verification.level.value == "focused":
+          usage.focused_verification_status = status
+          if status == "passed":
+            usage.last_passed_focused_at_observation = observation_index
+          elif status == "failed":
+            usage.last_failed_focused_at_observation = observation_index
+          elif status == "unavailable":
+            usage.last_unavailable_focused_at_observation = observation_index
+        else:
+          usage.full_verification_status = status
+        session.trace.record_verification(source="external_host", **verification_data)
+        label = f"{verification.level.value} {verification.kind.value} verification"
+        obs_text = f"[Verification: {label} {status}]\n{obs_text}"
       if receipt is not None and receipt.exit_code == 0:
         raw_arguments = tc.get("function", {}).get("arguments", {})
         if isinstance(raw_arguments, str):

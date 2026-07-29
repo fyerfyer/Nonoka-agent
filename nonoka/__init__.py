@@ -49,6 +49,10 @@ from nonoka.core.external_tool import (
   ExternalCapability,
   ExternalToolReceipt,
   ObservationCompleteness,
+  VerificationKind,
+  VerificationLevel,
+  VerificationReceipt,
+  VerificationStatus,
   WorkspaceAttestation,
 )
 from nonoka.core.runtime import (
@@ -64,6 +68,7 @@ from nonoka.core.runtime import (
   TerminalReason,
   Termination,
   WorkspaceMutationRule,
+  VerificationPassedRule,
 )
 from nonoka.core.memory import ContextBudget, ContextCompactor, ContextMetrics, ProtocolAwareContextCompactor
 from nonoka.core.external_mcp import (
@@ -142,6 +147,10 @@ __all__ = [
   "EffectAttestation",
   "ObservationCompleteness",
   "WorkspaceAttestation",
+  "VerificationKind",
+  "VerificationLevel",
+  "VerificationReceipt",
+  "VerificationStatus",
   "CompletionContract",
   "CompletionRule",
   "WorkspaceMutationRule",
@@ -149,6 +158,7 @@ __all__ = [
   "PathsChangedRule",
   "CommandSucceededRule",
   "CompleteObservationRule",
+  "VerificationPassedRule",
   "RuntimeLimits",
   "RuntimeUsage",
   "SessionRuntimeState",
