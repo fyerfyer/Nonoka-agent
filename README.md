@@ -1,5 +1,7 @@
 # Nonoka
 
+English | [简体中文](README.zh-CN.md)
+
 A production-grade, type-safe Python agent framework with deterministic orchestration, conversational execution, and first-class MCP integration.
 
 ## Features
