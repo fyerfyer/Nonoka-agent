@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar, Token
 import uuid
 import weakref
 from collections.abc import AsyncIterator
@@ -94,6 +95,9 @@ class Runner:
   ):
     # LLM providers are cached per-model and created lazily on first use.
     self._llm_cache: dict[str, LiteLLMProvider] = {}
+    self._active_llm: ContextVar[LiteLLMProvider | None] = ContextVar(
+      f"nonoka_runner_llm_{id(self)}", default=None,
+    )
 
     # Optional circuit breaker shared across all providers created by this runner.
     self._circuit_breaker = circuit_breaker
@@ -162,12 +166,27 @@ class Runner:
     model = agent.model
     if model in self._llm_cache:
       self.llm = self._llm_cache[model]
+      self._active_llm.set(self.llm)
       return self.llm
 
     provider = self._create_llm(agent)
     self._llm_cache[model] = provider
     self.llm = provider
+    self._active_llm.set(provider)
     return provider
+
+  def activate_agent(self, agent: Agent[DepsT, ResultT]) -> Token:
+    """Select an agent provider in the current async context only."""
+    provider = self._llm_cache.get(agent.model)
+    if provider is None:
+      provider = self._create_llm(agent)
+      self._llm_cache[agent.model] = provider
+    self.llm = provider
+    return self._active_llm.set(provider)
+
+  def reset_active_llm(self, token: Token) -> None:
+    """Restore the provider previously active in this async context."""
+    self._active_llm.reset(token)
 
   def _create_llm(self, agent: Agent[DepsT, ResultT]) -> LiteLLMProvider:
     """Create the default LLM provider (LiteLLM) bound to *agent*'s policy."""
@@ -220,7 +239,7 @@ class Runner:
     temperature: float | None, max_tokens: int | None,
   ) -> Any:
     """Run a cache-safe completion through a single-flight exact cache."""
-    provider = self.llm
+    provider = self._active_llm.get() or self.llm
     if provider is None:
       raise RuntimeError("Runner LLM has not been initialized")
     eligible = self.response_cache is not None and not tools and not any(

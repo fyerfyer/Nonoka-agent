@@ -122,6 +122,32 @@ class WorkspaceProgressExtension:
     self.reminder_interval = max(1, reminder_interval)
     self.max_post_verification_batches = max(1, max_post_verification_batches)
 
+  async def before_turn(self, context: LoopExtensionContext) -> ExtensionDecision:
+    """Reserve a tool-free response turn once the completion evidence is met."""
+    contract = getattr(context.session, "completion_contract", None)
+    runtime_state = getattr(context.session, "runtime_state", None)
+    usage = getattr(runtime_state, "usage", None)
+    if contract is None or usage is None or contract.unmet_requirements(usage):
+      return ExtensionDecision()
+    if getattr(contract, "require_focused_verification", False):
+      latest = getattr(usage, "latest_verification", None) or {}
+      command = str(latest.get("command", "")) if isinstance(latest, dict) else ""
+      if "NONOKA_VERIFY=focused" not in command:
+        return ExtensionDecision(
+          details={"phase": "verification_ready", "awaiting_explicit_focused_check": True}
+        )
+    state = getattr(context.session, "extension_state", {}).setdefault(self.name, {})
+    state["finalization_turn"] = context.turn
+    return ExtensionDecision(
+      feedback=(
+        "[Finalization turn] The configured completion evidence is satisfied. "
+        "Tools are disabled for this turn. Return the concise final answer now, "
+        "summarizing the change and the verification evidence."
+      ),
+      disable_tools=True,
+      details={"phase": "finalization", "tools_disabled": True},
+    )
+
   async def after_tool_batch(self, context: LoopExtensionContext) -> ExtensionDecision:
     extension_state = getattr(context.session, "extension_state", None)
     if isinstance(extension_state, dict):
@@ -170,6 +196,38 @@ class WorkspaceProgressExtension:
       state["verification_ready"] = False
       state["post_verification_batches"] = 0
       state["completion_reminded"] = False
+
+    contract = getattr(context.session, "completion_contract", None)
+    last_partial_at = getattr(usage, "last_partial_observation_at", None)
+    last_guided_partial_at = int(state.get("last_guided_partial_at", 0))
+    if (
+      contract is not None
+      and usage is not None
+      and last_partial_at is not None
+      and last_partial_at > last_guided_partial_at
+      and contract.observation_review_unmet(usage)
+    ):
+      # This feedback starts the evidence epoch required by
+      # CompleteObservationRule. A complete result from the same batch may be
+      # unrelated, so only a later bounded observation can close the partial.
+      usage.observation_feedback_after = usage.observation_count
+      state["last_guided_partial_at"] = last_partial_at
+      tool_name = getattr(usage, "latest_partial_tool", None) or "tool result"
+      artifact_ref = getattr(usage, "latest_partial_artifact_ref", None)
+      target = f" Inspect the bounded artifact `{artifact_ref}`." if artifact_ref else ""
+      return ExtensionDecision(
+        feedback=(
+          f"[Partial observation] The latest `{tool_name}` result was incomplete."
+          f"{target} Narrow the query or read a bounded line/byte region now, and "
+          "obtain one complete follow-up observation before final verification or completion."
+        ),
+        details={
+          "phase": "observation_recovery",
+          "partial_observation_at": last_partial_at,
+          "observation_feedback_after": usage.observation_feedback_after,
+          "artifact_ref": artifact_ref,
+        },
+      )
 
     last_effect_at = getattr(usage, "last_effect_at_observation", None)
     last_success_at = getattr(usage, "last_successful_command_at_observation", None)

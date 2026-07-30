@@ -76,3 +76,10 @@ markers = [
   "eval: deterministic agent-evaluation tests",
   "live: tests that call a real LLM or external benchmark",
 ]
+
+[tool.ruff]
+line-length = 100
+indent-width = 2
+
+[tool.ruff.format]
+indent-style = "space"

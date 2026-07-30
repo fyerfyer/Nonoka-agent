@@ -147,6 +147,8 @@ class ReActAgent:
           t for t in session.agent.tools
           if t.name not in blocked
         ] if session.agent.tools else []
+        if start_decision.disable_tools:
+          available_tools = []
         tools = [t.to_json_schema() for t in available_tools] if available_tools else None
 
         # --- LLM call ------------------------------------------------
@@ -221,6 +223,25 @@ class ReActAgent:
           turn=turn + 1,
           has_tool_calls=bool(response.tool_calls),
         )
+
+        if start_decision.disable_tools and response.tool_calls:
+          state = session.extension_state.setdefault("tool_free_finalization", {})
+          rejected = int(state.get("rejected_tool_calls", 0))
+          if rejected >= 1:
+            return await self._extension_failure(
+              session,
+              runner,
+              "The model repeatedly attempted tool calls during tool-free finalization.",
+            )
+          state["rejected_tool_calls"] = rejected + 1
+          if session.memory is not None:
+            await session.memory.add(
+              "[Finalization correction] The attempted tool call was rejected and was not "
+              "executed. Tools remain disabled. Return the final answer now without any tool call.",
+              MemoryRole.SYSTEM,
+            )
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          continue
 
         # --- No tool calls → final answer ---------------------------
         if not response.tool_calls:
@@ -957,6 +978,8 @@ class ReActAgent:
           t for t in session.agent.tools
           if t.name not in blocked
         ] if session.agent.tools else []
+        if start_decision.disable_tools:
+          available_tools = []
         tools = [t.to_json_schema() for t in available_tools] if available_tools else None
 
         # --- Streaming LLM call --------------------------------------
@@ -1008,10 +1031,11 @@ class ReActAgent:
                 yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
               if chunk.tool_call_deltas:
                 self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
-                for progress in self._collect_tool_call_progress(
-                  accumulated_tool_calls, reported_tool_argument_chars,
-                ):
-                  yield StreamEvent(type="tool_call_progress", data=progress)
+                if not start_decision.disable_tools:
+                  for progress in self._collect_tool_call_progress(
+                    accumulated_tool_calls, reported_tool_argument_chars,
+                  ):
+                    yield StreamEvent(type="tool_call_progress", data=progress)
               if chunk.finish_reason:
                 break
           else:
@@ -1025,10 +1049,11 @@ class ReActAgent:
                   yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
                 if chunk.tool_call_deltas:
                   self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
-                  for progress in self._collect_tool_call_progress(
-                    accumulated_tool_calls, reported_tool_argument_chars,
-                  ):
-                    yield StreamEvent(type="tool_call_progress", data=progress)
+                  if not start_decision.disable_tools:
+                    for progress in self._collect_tool_call_progress(
+                      accumulated_tool_calls, reported_tool_argument_chars,
+                    ):
+                      yield StreamEvent(type="tool_call_progress", data=progress)
                 if chunk.finish_reason:
                   break
         except TimeoutError as exc:
@@ -1067,6 +1092,29 @@ class ReActAgent:
           turn=turn + 1,
           has_tool_calls=bool(tool_calls),
         )
+
+        if start_decision.disable_tools and response.tool_calls:
+          state = session.extension_state.setdefault("tool_free_finalization", {})
+          rejected = int(state.get("rejected_tool_calls", 0))
+          if rejected >= 1:
+            session.status = SessionStatus.FAILED
+            session.end_time = __import__("datetime").datetime.now()
+            await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+            yield StreamEvent(type="error", data={
+              "success": False,
+              "error": "The model repeatedly attempted tool calls during tool-free finalization.",
+              "error_type": "extension_rejected",
+            })
+            return
+          state["rejected_tool_calls"] = rejected + 1
+          if session.memory is not None:
+            await session.memory.add(
+              "[Finalization correction] The attempted tool call was rejected and was not "
+              "executed. Tools remain disabled. Return the final answer now without any tool call.",
+              MemoryRole.SYSTEM,
+            )
+          await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+          continue
 
         # --- No tool calls → final answer ---------------------------
         if not response.tool_calls:

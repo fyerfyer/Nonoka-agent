@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import pytest
+import asyncio
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from nonoka.core.agent import Agent
 from nonoka.core.agent_tool import AgentTool, MemoryStrategy
 from nonoka.core.context import RunContext
-from nonoka.core.memory import MemoryRole, WorkingMemory
+from nonoka.core.hooks import Hooks
+from nonoka.core.memory import MemoryRole
 from nonoka.core.runner import Runner
 from nonoka.core.session import Session
 from nonoka.core.tool import tool
 from nonoka.core.types import RunResult
-from nonoka.backends.memory.in_memory import InMemoryBackend
 
 
 # --------------------------------------------------------------------------- #
@@ -26,7 +29,7 @@ def _make_mock_runner(
 
   The mock provider is returned for ANY agent model via _create_llm override.
   """
-  runner = Runner(checkpoint="memory")
+  runner = Runner(checkpoint="memory", memory="in_memory")
   provider = MagicMock()
   provider.chat = AsyncMock(
     return_value=MagicMock(
@@ -163,7 +166,7 @@ async def test_agent_tool_executes_below_depth_limit():
   object.__setattr__(session, "_agent_depth", 0)
   ctx = RunContext(session)
 
-  result = await at.invoke(ctx, {"task": "do something"})
+  await at.invoke(ctx, {"task": "do something"})
 
   # Should have called the LLM (sub-agent ran)
   runner.llm.chat.assert_called()
@@ -180,7 +183,7 @@ async def test_agent_tool_depth_0_by_default():
   assert not hasattr(session, "_agent_depth")
   ctx = RunContext(session)
 
-  result = await at.invoke(ctx, {"task": "do something"})
+  await at.invoke(ctx, {"task": "do something"})
 
   # Should succeed because depth 0 < max_depth 1
   runner.llm.chat.assert_called()
@@ -206,6 +209,35 @@ async def test_agent_tool_respects_parent_cancellation():
   assert "error" in result
   assert "cancel" in result["error"].lower()
   runner.llm.chat.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_propagates_cancellation_while_child_is_running():
+  """Cancelling the parent should stop an already-running child session."""
+  started = asyncio.Event()
+
+  async def slow_chat(*args, **kwargs):
+    started.set()
+    await asyncio.Event().wait()
+
+  provider = MagicMock()
+  provider.chat = AsyncMock(side_effect=slow_chat)
+  runner = Runner(checkpoint="memory", memory="in_memory")
+  runner._create_llm = lambda agent: provider  # type: ignore[method-assign]
+  runner.llm = provider
+  parent = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+  invocation = asyncio.create_task(
+    AgentTool(agent=Agent(model="child", tools=[])).invoke(
+      RunContext(parent), {"task": "wait"}
+    )
+  )
+
+  await started.wait()
+  parent.cancel()
+  result = await invocation
+
+  assert result["success"] is False
+  assert result["error_type"] == "cancelled"
 
 
 # --------------------------------------------------------------------------- #
@@ -262,6 +294,92 @@ async def test_agent_tool_custom_result_extractor():
   assert "ok" in result
   assert "payload" in result
   assert "turns" in result
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_selects_child_model_and_restores_parent_provider():
+  parent_provider = MagicMock()
+  child_provider = MagicMock()
+  child_provider.chat = AsyncMock(
+    return_value=MagicMock(content="child answer", tool_calls=None, usage={})
+  )
+  providers = {"parent-model": parent_provider, "child-model": child_provider}
+  runner = Runner(checkpoint="memory", memory="in_memory")
+  runner._create_llm = lambda agent: providers[agent.model]  # type: ignore[method-assign]
+  runner.llm = parent_provider
+  parent = await runner._create_session(Agent(model="parent-model", tools=[]), deps=None)
+
+  result = await AgentTool(agent=Agent(model="child-model", tools=[])).invoke(
+    RunContext(parent), {"task": "answer"}
+  )
+
+  assert result == "child answer"
+  child_provider.chat.assert_awaited()
+  assert runner.llm is parent_provider
+
+
+@pytest.mark.asyncio
+async def test_concurrent_agent_tools_keep_providers_task_local():
+  both_started = asyncio.Event()
+  started = 0
+
+  def provider(label):
+    mock = MagicMock()
+
+    async def chat(**_kwargs):
+      nonlocal started
+      started += 1
+      if started == 2:
+        both_started.set()
+      await asyncio.wait_for(both_started.wait(), timeout=1)
+      return MagicMock(content=label, tool_calls=None, usage={})
+
+    mock.chat = AsyncMock(side_effect=chat)
+    return mock
+
+  providers = {"child-a": provider("A"), "child-b": provider("B")}
+  runner = Runner(checkpoint="memory", memory="in_memory")
+  runner._create_llm = lambda agent: providers[agent.model]  # type: ignore[method-assign]
+  parent_a = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+  parent_b = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+
+  first, second = await asyncio.gather(
+    AgentTool(agent=Agent(model="child-a", tools=[])).invoke(
+      RunContext(parent_a), {"task": "first"}
+    ),
+    AgentTool(agent=Agent(model="child-b", tools=[])).invoke(
+      RunContext(parent_b), {"task": "second"}
+    ),
+  )
+
+  assert (first, second) == ("A", "B")
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_emits_child_session_hooks_with_parent_link():
+  starts = []
+  finishes = []
+
+  async def on_start(ctx):
+    starts.append(ctx)
+
+  async def on_end(ctx, result):
+    finishes.append((ctx, result))
+
+  runner = _make_mock_runner(response_content="done")
+  runner.hooks = Hooks(on_session_start=on_start, on_session_end=on_end)
+  parent = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+
+  await AgentTool(agent=Agent(model="child", tools=[])).invoke(
+    RunContext(parent), {"task": "review"}
+  )
+
+  assert len(starts) == 1
+  assert len(finishes) == 1
+  child = starts[0].session
+  assert child.session_id != parent.session_id
+  assert child._parent_session_id == parent.session_id
+  assert finishes[0][1].success is True
 
 
 @pytest.mark.asyncio
@@ -333,7 +451,7 @@ async def test_agent_tool_builds_prompt_with_task_and_context():
 @pytest.mark.asyncio
 async def test_agent_tool_isolate_strategy_no_parent_memory():
   """With ISOLATE, the child session should start with empty memory."""
-  runner = Runner(checkpoint="memory")
+  runner = Runner(checkpoint="memory", memory="in_memory")
   provider = _setup_mock_runner(runner, response_content="child answer")
 
   at = AgentTool(
@@ -363,7 +481,7 @@ async def test_agent_tool_isolate_strategy_no_parent_memory():
 @pytest.mark.asyncio
 async def test_agent_tool_inherit_strategy_copies_memory():
   """With INHERIT, the child session should copy last N parent memory entries."""
-  runner = Runner(checkpoint="memory")
+  runner = Runner(checkpoint="memory", memory="in_memory")
   provider = _setup_mock_runner(runner, response_content="child answer")
 
   at = AgentTool(
@@ -379,7 +497,7 @@ async def test_agent_tool_inherit_strategy_copies_memory():
   await parent_session.memory.add("Entry 3", MemoryRole.USER)
 
   ctx = RunContext(parent_session)
-  result = await at.invoke(ctx, {"task": "do something"})
+  await at.invoke(ctx, {"task": "do something"})
 
   # Child should have inherited last 2 entries
   calls = provider.chat.call_args_list
@@ -395,7 +513,7 @@ async def test_agent_tool_inherit_strategy_copies_memory():
 @pytest.mark.asyncio
 async def test_agent_tool_share_strategy_shares_memory_object():
   """With SHARE, the child should use the exact same WorkingMemory instance."""
-  runner = Runner(checkpoint="memory")
+  runner = Runner(checkpoint="memory", memory="in_memory")
   provider = _setup_mock_runner(runner, response_content="child answer")
 
   at = AgentTool(
@@ -408,7 +526,7 @@ async def test_agent_tool_share_strategy_shares_memory_object():
   await parent_session.memory.add("Shared context", MemoryRole.USER)
 
   ctx = RunContext(parent_session)
-  result = await at.invoke(ctx, {"task": "do something"})
+  await at.invoke(ctx, {"task": "do something"})
 
   # Child and parent share memory, so child sees parent entries
   calls = provider.chat.call_args_list
@@ -428,7 +546,7 @@ async def test_agent_tool_inherits_parent_deps():
     def __init__(self, value: str):
       self.value = value
 
-  runner = Runner(checkpoint="memory")
+  runner = Runner(checkpoint="memory", memory="in_memory")
 
   # Create a tool that reads deps to verify inheritance
   deps_value_captured = None
@@ -472,7 +590,7 @@ async def test_agent_tool_inherits_parent_deps():
   ctx = RunContext(parent_session)
 
   # Directly invoke the sub-agent tool with the parent context
-  result = await at2.invoke(ctx, {"task": "capture deps"})
+  await at2.invoke(ctx, {"task": "capture deps"})
 
   # The sub-agent should have run with the same deps
   assert deps_value_captured == "inherited_value"
@@ -494,20 +612,28 @@ async def test_agent_tool_resolves_runner_from_session():
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_fallback_runner_when_no_ref():
+async def test_agent_tool_fallback_runner_when_no_ref(monkeypatch):
   """When session lacks _runner_ref, AgentTool should create a default Runner."""
   at = AgentTool(agent=Agent(model="test", tools=[]))
+
+  provider = MagicMock()
+  provider.chat = AsyncMock(
+    return_value=MagicMock(content="fallback answer", tool_calls=None, usage={})
+  )
+  monkeypatch.setattr(
+    Runner,
+    "_create_llm",
+    lambda self, agent: provider,
+  )
 
   # Manually create a session without _runner_ref
   session = Session(session_id="test-session", agent=Agent(model="test", tools=[]), deps=None)
   assert not hasattr(session, "_runner_ref")
   ctx = RunContext(session)
 
-  # Should still work (creates fallback Runner)
+  # Should still work through the fallback Runner without a real model call.
   result = await at.invoke(ctx, {"task": "do something"})
-  # The fallback runner may or may not have an LLM configured,
-  # so we just verify it doesn't crash and returns a structured result
-  assert result is not None
+  assert result == "fallback answer"
 
 
 # --------------------------------------------------------------------------- #

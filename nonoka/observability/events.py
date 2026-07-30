@@ -299,11 +299,20 @@ class ObservabilityHooks(Hooks):
     span.end()
 
   async def on_session_start(self, ctx) -> None:
+    parent_session_id = getattr(ctx.session, "_parent_session_id", None)
     self._start_span(ctx, "nonoka.run", {
       "nonoka.session_id": ctx.session.session_id,
+      "nonoka.parent_session_id": parent_session_id,
       "gen_ai.request.model": ctx.agent.model,
     })
-    await self.store.append(ctx.session.session_id, "run.started", {"model": ctx.agent.model})
+    payload = {
+      "model": ctx.agent.model,
+      "metadata": dict(getattr(ctx.agent, "metadata", {}) or {}),
+      "tags": list(getattr(ctx.agent, "tags", []) or []),
+    }
+    if parent_session_id is not None:
+      payload["parent_session_id"] = parent_session_id
+    await self.store.append(ctx.session.session_id, "run.started", payload)
 
   async def on_session_end(self, ctx, result) -> None:
     await self.store.append(ctx.session.session_id, "run.finished", {

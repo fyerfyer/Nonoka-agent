@@ -5,10 +5,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from nonoka import Agent, Runner, tool
+from nonoka import Agent, ExternalCapability, Runner, tool
 from nonoka.core.extensions import ExtensionDecision, LoopExtensionContext, LoopExtensionManager
-from nonoka.core.llm import LLMResponse
+from nonoka.core.llm import LLMResponse, LLMStreamChunk
 from nonoka.core.paradigm import EvaluationResult
+from nonoka.core.runtime import (
+  CompleteObservationRule, CompletionContract, RuntimeUsage, WorkspaceMutationRule,
+)
 from nonoka.ext.coding import (
   CodeStrategy, CodeStrategyRouter, CodingWorkflow, ResponseGroundingExtension,
   TerminalCodingWorkflow, TerminalCommandEvaluator, VerifierDiagnosticCode, VerifierRepairExtension,
@@ -117,6 +120,174 @@ async def test_after_tool_batch_extension_can_add_guidance_without_altering_tool
   assert result.success is True
   assert any("Now summarize" in entry.content for entry in result.session.memory.entries)
   assert result.trace["extensions"][-1]["name"] == "tool_guidance"
+
+
+@pytest.mark.asyncio
+async def test_extension_can_restrict_a_turn_to_final_response_only():
+  observed_tools = []
+
+  class FinalizeOnly:
+    name = "finalize_only"
+
+    async def before_turn(self, _context):
+      return ExtensionDecision(feedback="Finish now.", disable_tools=True)
+
+  class Provider:
+    async def chat(self, **kwargs):
+      observed_tools.append(kwargs.get("tools"))
+      return LLMResponse(content="finished")
+
+  runner = Runner(checkpoint="memory", memory="in_memory")
+  runner._create_llm = lambda _agent: Provider()  # type: ignore[method-assign]
+  agent = Agent(model="fake", tools=[], extensions=[FinalizeOnly()])
+
+  result = await runner.run_react(agent, "finish", deps=None)
+
+  assert result.success is True
+  assert observed_tools == [None]
+  assert any("Finish now" in entry.content for entry in result.session.memory.entries)
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_disables_tools_only_after_contract_is_satisfied():
+  extension = WorkspaceProgressExtension()
+  usage = RuntimeUsage(mutation_count=1)
+  session = SimpleNamespace(
+    completion_contract=CompletionContract(rules=(WorkspaceMutationRule(),)),
+    runtime_state=SimpleNamespace(usage=usage),
+    extension_state={},
+  )
+
+  decision = await extension.before_turn(
+    LoopExtensionContext(session=session, runner=None, prompt="", turn=3)
+  )
+
+  assert decision.disable_tools is True
+  assert decision.details["phase"] == "finalization"
+
+  usage.mutation_count = 0
+  decision = await extension.before_turn(
+    LoopExtensionContext(session=session, runner=None, prompt="", turn=4)
+  )
+  assert decision.disable_tools is False
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_waits_for_explicit_focused_marker():
+  extension = WorkspaceProgressExtension()
+  usage = RuntimeUsage(
+    mutation_count=1,
+    focused_verification_status="passed",
+    last_passed_focused_at_observation=2,
+    last_effect_at_observation=1,
+    latest_verification={"command": "pytest -q tests/test_target.py"},
+  )
+  session = SimpleNamespace(
+    completion_contract=CompletionContract(
+      require_workspace_mutation=True,
+      require_focused_verification=True,
+    ),
+    runtime_state=SimpleNamespace(usage=usage),
+    extension_state={},
+  )
+
+  ordinary = await extension.before_turn(
+    LoopExtensionContext(session=session, runner=None, prompt="", turn=3)
+  )
+  usage.latest_verification = {
+    "command": "NONOKA_VERIFY=focused pytest -q tests/test_target.py"
+  }
+  explicit = await extension.before_turn(
+    LoopExtensionContext(session=session, runner=None, prompt="", turn=4)
+  )
+
+  assert ordinary.disable_tools is False
+  assert ordinary.details["awaiting_explicit_focused_check"] is True
+  assert explicit.disable_tools is True
+
+
+@pytest.mark.asyncio
+async def test_tool_call_during_finalization_is_rejected_without_execution():
+  calls = 0
+
+  @tool
+  async def forbidden_tool(ctx):
+    nonlocal calls
+    calls += 1
+    return "should not run"
+
+  class FinalizeOnly:
+    name = "finalize_only"
+
+    async def before_turn(self, _context):
+      return ExtensionDecision(disable_tools=True)
+
+  tool_call = {
+    "id": "forbidden-1",
+    "function": {"name": "forbidden_tool", "arguments": "{}"},
+  }
+  runner = make_runner([
+    LLMResponse(tool_calls=[tool_call]),
+    LLMResponse(tool_calls=[tool_call]),
+  ])
+  agent = Agent(
+    model="fake",
+    tools=[forbidden_tool],
+    extensions=[FinalizeOnly()],
+    max_turns=2,
+  )
+
+  result = await runner.run_react(agent, "finish", deps=None)
+
+  assert result.success is False
+  assert result.error_type == "extension_rejected"
+  assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_streaming_finalization_suppresses_hallucinated_host_tool_and_recovers():
+  observed_tools = []
+
+  class FinalizeOnly:
+    name = "finalize_only"
+
+    async def before_turn(self, _context):
+      return ExtensionDecision(disable_tools=True)
+
+  class Provider:
+    calls = 0
+
+    async def chat_stream(self, **kwargs):
+      observed_tools.append(kwargs.get("tools"))
+      self.calls += 1
+      if self.calls == 1:
+        yield LLMStreamChunk(tool_call_deltas=[{
+          "index": 0,
+          "id": "host-1",
+          "function": {"name": "host_tool", "arguments": "{}"},
+        }])
+        yield LLMStreamChunk(finish_reason="tool_calls")
+      else:
+        yield LLMStreamChunk(content_delta="finished")
+        yield LLMStreamChunk(finish_reason="stop")
+
+  runner = Runner(checkpoint="memory", memory="in_memory")
+  runner._create_llm = lambda _agent: Provider()  # type: ignore[method-assign]
+  agent = Agent(
+    model="fake",
+    tools=[ExternalCapability(
+      name="host_tool", description="host", parameters={"type": "object"},
+    )],
+    extensions=[FinalizeOnly()],
+    max_turns=3,
+  )
+
+  events = [event async for event in runner.run_react_stream(agent, "finish", deps=None)]
+
+  assert events[-1].type == "final"
+  assert events[-1].data["data"] == "finished"
+  assert not any(event.type.startswith("tool_call") for event in events)
+  assert observed_tools == [None, None]
 
 
 def test_extension_names_must_be_unique():
@@ -290,6 +461,40 @@ async def test_workspace_progress_extension_accepts_complete_post_effect_observa
   assert "Completion evidence" in (decision.feedback or "")
   assert decision.details["post_effect_complete"] is True
   assert decision.details["successful_command_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_workspace_progress_requests_bounded_follow_up_immediately_after_partial_observation():
+  extension = WorkspaceProgressExtension()
+  usage = RuntimeUsage(
+    observation_count=4,
+    partial_observation_count=1,
+    last_partial_observation_at=4,
+    last_complete_observation_at=3,
+    latest_partial_tool="read",
+    latest_partial_artifact_ref="artifacts/read-4.txt",
+  )
+  session = SimpleNamespace(
+    completion_contract=CompletionContract(rules=(CompleteObservationRule(),)),
+    extension_state={},
+    runtime_state=SimpleNamespace(usage=usage),
+  )
+  context = LoopExtensionContext(
+    session=session, runner=None, prompt="", turn=2, tool_calls=[], tool_results=[],
+  )
+
+  decision = await extension.after_tool_batch(context)
+
+  assert decision.details["phase"] == "observation_recovery"
+  assert "bounded artifact" in (decision.feedback or "")
+  assert usage.observation_feedback_after == 4
+
+  usage.observation_count = 5
+  usage.last_complete_observation_at = 5
+  follow_up = await extension.after_tool_batch(context)
+
+  assert follow_up.details["phase"] == "exploration"
+  assert session.completion_contract.unmet_requirements(usage) == []
 
 
 @pytest.mark.asyncio

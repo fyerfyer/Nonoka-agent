@@ -82,6 +82,30 @@ async def test_observability_hooks_write_error_event(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_observability_hooks_record_child_agent_identity(tmp_path):
+  store = SQLiteEventStore(tmp_path / "events.db")
+  hooks = ObservabilityHooks(store)
+  agent = Agent(
+    model="child-model",
+    metadata={"project_agent_role": "reviewer"},
+    tags=["subagent", "project-defined"],
+  )
+  session = Session(session_id="child", agent=agent, deps=None)
+  object.__setattr__(session, "_parent_session_id", "parent")
+
+  await hooks.on_session_start(RunContext(session))
+
+  event = (await store.list("child"))[0]
+  assert event["payload"] == {
+    "model": "child-model",
+    "metadata": {"project_agent_role": "reviewer"},
+    "tags": ["subagent", "project-defined"],
+    "parent_session_id": "parent",
+  }
+  await store.close()
+
+
+@pytest.mark.asyncio
 async def test_event_store_reads_existing_read_only_database(tmp_path):
   path = tmp_path / "events.db"
   writer = SQLiteEventStore(path)

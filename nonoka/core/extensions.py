@@ -38,6 +38,10 @@ class ExtensionDecision:
   continue_loop: bool = False
   replacement_content: str | None = None
   failure: str | None = None
+  # Extensions may only remove tool authority for a turn.  This supports a
+  # deterministic final-response turn without allowing extensions to grant or
+  # rewrite capabilities.
+  disable_tools: bool = False
   details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -99,6 +103,15 @@ class LoopExtensionManager:
       raw = await _maybe_await(callback(context))
       decision = _coerce_decision(raw)
       self._record(context, extension, phase, decision)
+      if decision.disable_tools and not combined.disable_tools:
+        combined = ExtensionDecision(
+          feedback=combined.feedback,
+          continue_loop=combined.continue_loop,
+          replacement_content=combined.replacement_content,
+          failure=combined.failure,
+          disable_tools=True,
+          details={**combined.details, **decision.details},
+        )
       if decision.replacement_content is not None:
         context.content = decision.replacement_content
         combined = ExtensionDecision(
@@ -106,6 +119,7 @@ class LoopExtensionManager:
           continue_loop=combined.continue_loop,
           replacement_content=decision.replacement_content,
           failure=combined.failure,
+          disable_tools=combined.disable_tools or decision.disable_tools,
           details={**combined.details, **decision.details},
         )
       if decision.feedback:
@@ -114,6 +128,7 @@ class LoopExtensionManager:
           continue_loop=combined.continue_loop or decision.continue_loop,
           replacement_content=combined.replacement_content,
           failure=combined.failure,
+          disable_tools=combined.disable_tools or decision.disable_tools,
           details={**combined.details, **decision.details},
         )
       if decision.continue_loop:
@@ -122,6 +137,7 @@ class LoopExtensionManager:
           continue_loop=True,
           replacement_content=combined.replacement_content,
           failure=combined.failure,
+          disable_tools=combined.disable_tools or decision.disable_tools,
           details={**combined.details, **decision.details},
         )
       if decision.failure:
@@ -130,6 +146,7 @@ class LoopExtensionManager:
           continue_loop=False,
           replacement_content=combined.replacement_content,
           failure=decision.failure,
+          disable_tools=combined.disable_tools or decision.disable_tools,
           details={**combined.details, **decision.details},
         )
     return combined
@@ -145,6 +162,7 @@ class LoopExtensionManager:
           "continue_loop": decision.continue_loop,
           "replacement_content": decision.replacement_content,
           "failure": decision.failure,
+          "disable_tools": decision.disable_tools,
           "details": decision.details,
         },
       )

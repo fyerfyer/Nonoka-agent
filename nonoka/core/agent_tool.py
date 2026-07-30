@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from enum import Enum
 from typing import Any, Callable
 
@@ -237,7 +239,7 @@ class AgentTool(Capability):
     )
     from nonoka.core.runner import Runner
 
-    return Runner()
+    return Runner(checkpoint="memory", memory="in_memory")
 
   async def _run_isolate(
     self,
@@ -247,13 +249,7 @@ class AgentTool(Capability):
   ) -> RunResult:
     """Run sub-agent in a completely isolated session."""
     session = await runner._create_session(self.agent, ctx.deps)
-    object.__setattr__(session, "_agent_depth", getattr(ctx.session, "_agent_depth", 0) + 1)
-
-    from nonoka.core.paradigm import ReActAgent
-
-    paradigm = ReActAgent()
-    result = await paradigm.run(session, runner, prompt=prompt)
-    return result
+    return await self._run_child(ctx, runner, session, prompt)
 
   async def _run_inherit(
     self,
@@ -263,7 +259,6 @@ class AgentTool(Capability):
   ) -> RunResult:
     """Run sub-agent, copying the last N parent memory entries."""
     session = await runner._create_session(self.agent, ctx.deps)
-    object.__setattr__(session, "_agent_depth", getattr(ctx.session, "_agent_depth", 0) + 1)
 
     # Copy last N entries from parent memory
     if ctx.session.memory is not None and session.memory is not None:
@@ -272,11 +267,7 @@ class AgentTool(Capability):
       for entry in to_copy:
         session.memory.entries.append(entry)
 
-    from nonoka.core.paradigm import ReActAgent
-
-    paradigm = ReActAgent()
-    result = await paradigm.run(session, runner, prompt=prompt)
-    return result
+    return await self._run_child(ctx, runner, session, prompt)
 
   async def _run_share(
     self,
@@ -286,14 +277,115 @@ class AgentTool(Capability):
   ) -> RunResult:
     """Run sub-agent sharing the parent's WorkingMemory object."""
     session = await runner._create_session(self.agent, ctx.deps)
-    object.__setattr__(session, "_agent_depth", getattr(ctx.session, "_agent_depth", 0) + 1)
 
     # Share the same WorkingMemory instance
     if ctx.session.memory is not None:
       object.__setattr__(session, "memory", ctx.session.memory)
 
+    return await self._run_child(ctx, runner, session, prompt)
+
+  async def _run_child(
+    self,
+    ctx: RunContext,
+    runner: Any,
+    session: Any,
+    prompt: str,
+  ) -> RunResult:
+    """Execute a child session with the parent Runner lifecycle intact.
+
+    ``AgentTool`` historically invoked ``ReActAgent`` directly.  That skipped
+    the child's configured model selection and the Runner's session hooks, and
+    it only observed parent cancellation before starting.  Keep the lightweight
+    tool-based architecture while preserving those Runner invariants here.
+    """
+    from nonoka.core.extensions import LoopExtensionContext, LoopExtensionManager
+    from nonoka.core.hooks import HookContext
     from nonoka.core.paradigm import ReActAgent
 
+    object.__setattr__(
+      session,
+      "_agent_depth",
+      getattr(ctx.session, "_agent_depth", 0) + 1,
+    )
+    object.__setattr__(session, "_parent_session_id", ctx.session_id)
+
+    previous_llm = getattr(runner, "llm", None)
+    active_llm_token = None
+    activate_agent = getattr(runner, "activate_agent", None)
+    if callable(activate_agent):
+      active_llm_token = activate_agent(self.agent)
+    else:
+      ensure_llm = getattr(runner, "_ensure_llm", None)
+      if callable(ensure_llm):
+        ensure_llm(self.agent)
+
+    hook_ctx = HookContext(session=session, runner=runner)
     paradigm = ReActAgent()
-    result = await paradigm.run(session, runner, prompt=prompt)
-    return result
+    invocation_task = asyncio.current_task()
+    parent_cancel_event = getattr(ctx.session, "_cancel_event", None)
+
+    async def _propagate_parent_cancellation() -> None:
+      await parent_cancel_event.wait()
+      session.cancel()
+      if invocation_task is not None:
+        invocation_task.cancel()
+
+    cancel_task = (
+      asyncio.create_task(_propagate_parent_cancellation())
+      if parent_cancel_event
+      else None
+    )
+    result: RunResult
+    try:
+      await runner.hooks.emit_session_start(hook_ctx)
+      result = await paradigm.run(session, runner, prompt=prompt)
+
+      await LoopExtensionManager(list(getattr(self.agent, "extensions", []))).after_run(
+        LoopExtensionContext(
+          session=session,
+          runner=runner,
+          prompt=prompt,
+          turn=session.turn_count,
+        ),
+        result,
+      )
+      attach_trace = getattr(runner, "_attach_trace", None)
+      if callable(attach_trace):
+        result = attach_trace(result)
+      return result
+    except asyncio.CancelledError:
+      session.cancel()
+      await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      result = RunResult(
+        success=False,
+        session=session,
+        error=(
+          "Sub-agent invocation cancelled with its parent session."
+          if ctx.session.is_cancelled
+          else "Sub-agent invocation cancelled."
+        ),
+        error_type="cancelled",
+      )
+      return result
+    except Exception as exc:
+      result = RunResult(
+        success=False,
+        session=session,
+        error=str(exc),
+        error_type=type(exc).__name__,
+      )
+      return result
+    finally:
+      if cancel_task is not None:
+        cancel_task.cancel()
+        with suppress(asyncio.CancelledError):
+          await cancel_task
+      try:
+        final_result = locals().get("result")
+        if isinstance(final_result, RunResult):
+          await runner.hooks.emit_session_end(hook_ctx, final_result)
+      finally:
+        reset_active_llm = getattr(runner, "reset_active_llm", None)
+        if active_llm_token is not None and callable(reset_active_llm):
+          reset_active_llm(active_llm_token)
+        runner.llm = previous_llm
