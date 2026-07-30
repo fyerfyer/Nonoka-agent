@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
-
 import structlog
 
 from nonoka.skills.skill import Skill
@@ -11,7 +9,7 @@ _logger = structlog.get_logger("nonoka.skills")
 
 
 class SkillLoader:
-  """Scan directories for ``*.md`` skill files and load them into Skill objects.
+  """Discover Agent Skills directories and legacy flat Markdown skills.
 
   Usage::
 
@@ -76,10 +74,8 @@ class SkillLoader:
   def auto_find(cls) -> list[Skill]:
     """Auto-discover skills across standard paths.
 
-    Search order (later paths override earlier ones for duplicate names):
-      1. ``./skills/`` — project-level skills
-      2. ``./.nonoka/skills/`` — project hidden directory
-      3. ``~/.config/nonoka/skills/`` — user-level global skills
+    Search order is low-to-high precedence so project skills override user
+    skills, matching the Agent Skills client convention.
 
     Returns:
       A deduplicated list of Skill objects. Duplicate names are resolved
@@ -108,14 +104,27 @@ class SkillLoader:
   @classmethod
   def _search_paths(cls) -> list[Path]:
     """Return standard skill search paths in priority order."""
-    paths: list[Path] = [
-      Path("skills"),           # project-level
-      Path(".nonoka/skills"),   # project hidden directory
+    home = Path.home()
+    return [
+      home / ".config" / "nonoka" / "skills",
+      home / ".agents" / "skills",
+      Path("skills"),
+      Path(".nonoka/skills"),
+      Path(".agents/skills"),
     ]
-    # user-level global
-    home_config = Path.home() / ".config/nonoka/skills"
-    paths.append(home_config)
-    return paths
+
+  @classmethod
+  def discover_files(cls, directory: Path) -> list[Path]:
+    """Return standard ``SKILL.md`` and legacy flat skill files."""
+    if not directory.is_dir():
+      return []
+    candidates: list[Path] = []
+    direct = directory / "SKILL.md"
+    if direct.is_file():
+      candidates.append(direct)
+    candidates.extend(sorted(directory.glob("*/SKILL.md")))
+    candidates.extend(path for path in sorted(directory.glob("*.md")) if path.name != "SKILL.md")
+    return candidates
 
   @classmethod
   def _scan_directory(cls, directory: Path) -> list[Skill]:
@@ -124,7 +133,7 @@ class SkillLoader:
     if not directory.is_dir():
       return skills
 
-    for file_path in sorted(directory.glob("*.md")):
+    for file_path in cls.discover_files(directory):
       try:
         skill = Skill.from_file(file_path)
         skills.append(skill)

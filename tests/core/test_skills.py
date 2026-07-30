@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import tempfile
+import typing
 from pathlib import Path
 
 import pytest
 import structlog
 
-from nonoka import Agent, Skill, SkillLoader, tool
+from nonoka import Agent, Skill, SkillLoader, SkillRegistry, tool
+from nonoka.core.runtime import CompletionContract, RuntimeLimits
 from nonoka.core.tool import Tool
 
 
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
 
 @tool
 async def dummy_tool_a(query: str) -> dict:
@@ -37,6 +40,7 @@ def make_skill_file(name: str, content: str) -> Path:
 # --------------------------------------------------------------------------- #
 # Skill parsing
 # --------------------------------------------------------------------------- #
+
 
 def test_skill_from_string_basic():
   content = """\
@@ -110,6 +114,7 @@ Always provide summary statistics.
 # Skill.apply_to
 # --------------------------------------------------------------------------- #
 
+
 def test_skill_apply_to_merge_tools():
   skill = Skill(
     name="test-skill",
@@ -130,6 +135,7 @@ def test_skill_apply_to_agent_tools_override_skill_tools():
     description="Test",
     tools=[dummy_tool_a],
   )
+
   # Create a different tool with the same name
   async def override_impl(query: str) -> dict:
     """Overridden tool A."""
@@ -186,9 +192,30 @@ def test_skill_apply_to_returns_agent_with_empty_skills():
   assert merged.skills == []
 
 
+def test_skill_apply_to_preserves_runtime_configuration():
+  marker = object()
+  agent = Agent(
+    model="gpt-4o",
+    temperature=0.2,
+    max_tokens=123,
+    runtime_limits=RuntimeLimits(max_model_turns=7),
+    completion_contract=CompletionContract(),
+    extensions=[marker],
+  )
+
+  merged = Skill(name="test-skill", description="Test").apply_to(agent)
+
+  assert merged.temperature == 0.2
+  assert merged.max_tokens == 123
+  assert merged.runtime_limits == agent.runtime_limits
+  assert merged.completion_contract == agent.completion_contract
+  assert merged.extensions == [marker]
+
+
 # --------------------------------------------------------------------------- #
 # Agent __post_init__ with skills
 # --------------------------------------------------------------------------- #
+
 
 def test_agent_expands_skills_on_construction():
   skill = Skill(
@@ -227,6 +254,7 @@ def test_agent_skills_override_order():
     description="First",
     tools=[dummy_tool_a],
   )
+
   # Create a different tool with the same name
   async def alt_impl(query: str) -> dict:
     """Alternative A."""
@@ -256,9 +284,16 @@ def test_agent_without_skills_unchanged():
   assert agent.skills == []
 
 
+def test_agent_public_type_hints_resolve():
+  hints = typing.get_type_hints(Agent)
+  assert "tools" in hints
+  assert "skills" in hints
+
+
 # --------------------------------------------------------------------------- #
 # SkillLoader
 # --------------------------------------------------------------------------- #
+
 
 def test_skill_loader_load_all():
   with tempfile.TemporaryDirectory() as tmpdir:
@@ -286,6 +321,106 @@ Body B.
 
     names = {s.name for s in skills}
     assert names == {"skill-a", "skill-b"}
+
+
+def test_skill_loader_supports_agent_skills_directory_layout(tmp_path: Path):
+  skill_dir = tmp_path / "code-review"
+  skill_dir.mkdir()
+  (skill_dir / "SKILL.md").write_text(
+    "---\nname: code-review\ndescription: Review code.\n---\nFollow references/checklist.md.\n",
+    encoding="utf-8",
+  )
+
+  skills = SkillLoader(tmp_path).load_all()
+
+  assert [skill.name for skill in skills] == ["code-review"]
+  assert skills[0].source == str((skill_dir / "SKILL.md").resolve())
+
+
+def test_standard_skill_lists_bundled_resources(tmp_path: Path):
+  skill_dir = tmp_path / "code-review"
+  (skill_dir / "references").mkdir(parents=True)
+  (skill_dir / "scripts").mkdir()
+  (skill_dir / "SKILL.md").write_text(
+    "---\nname: code-review\ndescription: Review code.\n---\nUse the checklist.\n",
+    encoding="utf-8",
+  )
+  (skill_dir / "references" / "checklist.md").write_text("Check safety.")
+  (skill_dir / "scripts" / "scan.py").write_text("print('ok')")
+
+  skill = SkillLoader(tmp_path).load_all()[0]
+
+  assert skill.directory == skill_dir.resolve()
+  assert skill.resources() == ["scripts/scan.py", "references/checklist.md"]
+
+
+def test_registry_discovery_does_not_import_skill_tools(tmp_path: Path):
+  (tmp_path / "safe-discovery.md").write_text(
+    "---\nname: safe-discovery\ndescription: Discover safely.\n"
+    "tools:\n  - import: definitely.not.a.module:func\n---\nBody.\n",
+    encoding="utf-8",
+  )
+  registry = SkillRegistry(enabled=["safe-discovery"], search_paths=[tmp_path])
+
+  with structlog.testing.capture_logs() as logs:
+    assert registry.enabled[0].name == "safe-discovery"
+
+  assert not any("definitely.not.a.module" in str(event) for event in logs)
+
+
+def test_project_agent_skills_override_user_skills(tmp_path: Path, monkeypatch):
+  fake_home = tmp_path / "home"
+  project = tmp_path / "project"
+  user_skill = fake_home / ".agents" / "skills" / "shared"
+  project_skill = project / ".agents" / "skills" / "shared"
+  user_skill.mkdir(parents=True)
+  project_skill.mkdir(parents=True)
+  (user_skill / "SKILL.md").write_text(
+    "---\nname: shared\ndescription: User version.\n---\nUser.\n",
+    encoding="utf-8",
+  )
+  (project_skill / "SKILL.md").write_text(
+    "---\nname: shared\ndescription: Project version.\n---\nProject.\n",
+    encoding="utf-8",
+  )
+  monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+  monkeypatch.chdir(project)
+
+  registry = SkillRegistry(enabled=["shared"])
+
+  assert registry.enabled[0].description == "Project version."
+
+
+def test_project_agent_skills_override_legacy_project_skills(tmp_path: Path, monkeypatch):
+  project = tmp_path / "project"
+  standard_skill = project / ".agents" / "skills" / "shared"
+  legacy_skills = project / "skills"
+  standard_skill.mkdir(parents=True)
+  legacy_skills.mkdir(parents=True)
+  (standard_skill / "SKILL.md").write_text(
+    "---\nname: shared\ndescription: Standard version.\n---\nStandard.\n",
+    encoding="utf-8",
+  )
+  (legacy_skills / "shared.md").write_text(
+    "---\nname: shared\ndescription: Legacy version.\n---\nLegacy.\n",
+    encoding="utf-8",
+  )
+  monkeypatch.chdir(project)
+
+  registry = SkillRegistry(enabled=["shared"])
+
+  assert registry.enabled[0].description == "Standard version."
+
+
+def test_registry_cannot_load_disabled_skill(tmp_path: Path):
+  (tmp_path / "disabled.md").write_text(
+    "---\nname: disabled\ndescription: Disabled.\n---\nDo not load.\n",
+    encoding="utf-8",
+  )
+  registry = SkillRegistry(enabled=[], search_paths=[tmp_path])
+
+  assert registry.enabled == []
+  assert registry.get_skill("disabled") is None
 
 
 def test_skill_loader_load_file():
@@ -327,6 +462,7 @@ def test_skill_loader_no_path_raises():
 # --------------------------------------------------------------------------- #
 # Error handling
 # --------------------------------------------------------------------------- #
+
 
 def test_skill_load_bad_file_logs_error():
   with tempfile.TemporaryDirectory() as tmpdir:

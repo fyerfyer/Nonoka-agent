@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -28,6 +28,7 @@ class Skill:
     skill = Skill.from_file("skills/code-review.md")
     agent = skill.apply_to(agent)
   """
+
   name: str
   description: str
   tools: list[Capability] = field(default_factory=list)
@@ -41,7 +42,12 @@ class Skill:
   # ------------------------------------------------------------------ #
 
   @classmethod
-  def from_file(cls, path: str | Path) -> Skill:
+  def from_file(
+    cls,
+    path: str | Path,
+    *,
+    resolve_tools: bool = True,
+  ) -> Skill:
     """Parse a Skill from a Markdown file with YAML frontmatter.
 
     Args:
@@ -55,10 +61,20 @@ class Skill:
     if not path.exists():
       raise FileNotFoundError(f"Skill file not found: {path}")
     content = path.read_text(encoding="utf-8")
-    return cls.from_string(content, source=str(path.resolve()))
+    return cls.from_string(
+      content,
+      source=str(path.resolve()),
+      resolve_tools=resolve_tools,
+    )
 
   @classmethod
-  def from_string(cls, content: str, source: str = "<string>") -> Skill:
+  def from_string(
+    cls,
+    content: str,
+    source: str = "<string>",
+    *,
+    resolve_tools: bool = True,
+  ) -> Skill:
     """Parse Skill content from a raw string.
 
     Args:
@@ -69,23 +85,18 @@ class Skill:
       ValueError: If the frontmatter is malformed or required fields are missing.
     """
     if not content.startswith("---"):
-      raise ValueError(
-        f"Skill file must start with YAML frontmatter '---': {source}"
-      )
+      raise ValueError(f"Skill file must start with YAML frontmatter '---': {source}")
 
     parts = content.split("---", 2)
     if len(parts) < 3:
-      raise ValueError(
-        f"Invalid skill file format (missing frontmatter close '---'): {source}"
-      )
+      raise ValueError(f"Invalid skill file format (missing frontmatter close '---'): {source}")
 
     import yaml
+
     try:
       frontmatter = yaml.safe_load(parts[1]) or {}
     except yaml.YAMLError as exc:
-      raise ValueError(
-        f"Invalid YAML frontmatter in {source}: {exc}"
-      ) from exc
+      raise ValueError(f"Invalid YAML frontmatter in {source}: {exc}") from exc
 
     if not isinstance(frontmatter, dict):
       raise ValueError(
@@ -99,7 +110,7 @@ class Skill:
       raise ValueError(f"Skill 'name' is required in frontmatter: {source}")
 
     description = frontmatter.get("description", "")
-    tools = cls._parse_tools(frontmatter.get("tools", []), source)
+    tools = cls._parse_tools(frontmatter.get("tools", []), source) if resolve_tools else []
 
     return cls(
       name=name,
@@ -180,12 +191,20 @@ class Skill:
     file_path, sep, func_name = file_entry.rpartition(":")
     if not sep:
       # No colon — treat whole file as auto-discover
+      file_path = file_entry
       func_name = None
 
+    resolved_path = Path(file_path).expanduser()
+    if not resolved_path.is_absolute() and source not in {"<string>", ""}:
+      source_path = Path(source)
+      if source_path.is_absolute():
+        resolved_path = source_path.parent / resolved_path
+
     from nonoka.core.hot_reload import PluginManager
+
     pm = PluginManager()
     try:
-      result = pm.load_tool_from_file(file_path, func_name)
+      result = pm.load_tool_from_file(str(resolved_path), func_name)
     except Exception as exc:
       _logger.error(f"Cannot load tool from file '{file_entry}' in {source}: {exc}")
       return None
@@ -199,6 +218,30 @@ class Skill:
       )
       return result[0] if result else None
     return result
+
+  @property
+  def directory(self) -> Path | None:
+    """Return the skill root used to resolve bundled resources."""
+    if not self.source or self.source.startswith("external:") or self.source == "<string>":
+      return None
+    return Path(self.source).resolve().parent
+
+  def resources(self, *, limit: int = 200) -> list[str]:
+    """List bundled resources without reading their contents."""
+    root = self.directory
+    if root is None:
+      return []
+    resources: list[str] = []
+    for folder_name in ("scripts", "references", "assets"):
+      folder = root / folder_name
+      if not folder.is_dir():
+        continue
+      for path in sorted(folder.rglob("*")):
+        if path.is_file():
+          resources.append(path.relative_to(root).as_posix())
+          if len(resources) >= limit:
+            return resources
+    return resources
 
   # ------------------------------------------------------------------ #
   # Application
@@ -217,7 +260,6 @@ class Skill:
     The returned Agent has ``skills=[]`` because the skill has already been
     expanded into concrete fields.
     """
-    from nonoka.core.agent import Agent
     from nonoka.core.hot_reload import ToolListProxy
 
     # Resolve current tools (may be ToolListProxy)
@@ -250,18 +292,10 @@ class Skill:
     merged_metadata = dict(agent.metadata)
     merged_metadata.update(self.metadata)
 
-    return Agent(
-      model=agent.model,
+    return replace(
+      agent,
       tools=merged_tools,
       system_prompt=merged_system_prompt,
       skills=[],
-      deps_type=agent.deps_type,
-      result_type=agent.result_type,
-      max_turns=agent.max_turns,
-      max_steps=agent.max_steps,
-      max_concurrency=agent.max_concurrency,
-      default_retry=agent.default_retry,
-      default_timeout=agent.default_timeout,
       metadata=merged_metadata,
-      tags=list(agent.tags),
     )

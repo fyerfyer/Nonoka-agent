@@ -361,7 +361,7 @@ Apply pre-packaged skills directly in the builder:
 ```python
 from nonoka import AgentBuilder, Skill
 
-skill = Skill.from_file("skills/code-review.md")
+skill = Skill.from_file(".agents/skills/code-review/SKILL.md")
 
 agent = (
     AgentBuilder()
@@ -391,7 +391,9 @@ agent = (
 )
 ```
 
-The `load_skill` tool injects the selected skill's `system_prompt` and `activation_prompt` into the conversation as a system message.
+Skills are discovered from the Agent Skills layout `<skill-root>/<skill-name>/SKILL.md`. Project `.agents/skills` entries override user-level `~/.agents/skills` entries with the same name. Legacy flat `skills/<name>.md` files remain supported for compatibility.
+
+The `load_skill` tool returns the selected guidance, skill directory, and bundled `scripts/`, `references/`, and `assets/` paths as a context-protected tool result. Discovery reads only skill metadata; tools declared by enabled skills are resolved when the runtime tool catalog is built, while the full guidance remains lazy until activation.
 
 ### MCP servers
 

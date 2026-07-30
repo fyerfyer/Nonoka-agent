@@ -171,6 +171,37 @@ async def test_protocol_compactor_keeps_evidence_ledger_and_valid_pairs():
 
 
 @pytest.mark.asyncio
+async def test_protocol_compactor_preserves_activated_skill_tool_result():
+  memory = WorkingMemory(session_id="skill-context", max_tokens=10_000, token_counter=len)
+  await memory.add("use the skill", MemoryRole.USER)
+  await memory.add(
+    "", MemoryRole.ASSISTANT, defer_budget=True,
+    tool_calls=[{
+      "id": "skill-call",
+      "function": {"name": "load_skill", "arguments": '{"name":"review"}'},
+    }],
+  )
+  await memory.add(
+    "protected skill instructions", MemoryRole.TOOL, defer_budget=True,
+    tool_call_id="skill-call", tool_name="load_skill", context_protected=True,
+  )
+  await memory.add("old disposable result" * 100, MemoryRole.USER, defer_budget=True)
+  await memory.add("continue", MemoryRole.USER, defer_budget=True)
+
+  await memory.enforce_budget(RuntimeLimits(
+    max_context_bytes=900, max_context_tokens=10_000,
+  ))
+
+  contents = [entry.content for entry in memory.entries]
+  assert "protected skill instructions" in contents
+  assert any(
+    entry.role == MemoryRole.ASSISTANT
+    and entry.metadata.get("tool_calls", [{}])[0].get("id") == "skill-call"
+    for entry in memory.entries
+  )
+
+
+@pytest.mark.asyncio
 async def test_working_memory_summary_strategy():
   """When summary_llm is provided, WorkingMemory auto-summarises old chats."""
   mock_llm = MockLLMProvider()

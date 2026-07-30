@@ -358,12 +358,16 @@ class ReActAgent:
             obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
 
           if session.memory is not None:
+            response_metadata = tr.get("metadata", {}) if isinstance(tr, dict) else {}
             await session.memory.add(
               obs_text,
               MemoryRole.TOOL,
               defer_budget=True,
               tool_call_id=tc_id,
               tool_name=func_name,
+              context_protected=bool(response_metadata.get("context_protected")),
+              skill_name=response_metadata.get("skill_name"),
+              skill_directory=response_metadata.get("skill_directory"),
             )
 
             # Collect ToolResponse metadata to inject after all tool messages
@@ -1298,12 +1302,16 @@ class ReActAgent:
                 },
               )
             if session.memory is not None:
+              response_metadata = item.get("metadata", {}) if isinstance(item, dict) else {}
               await session.memory.add(
                 obs_text,
                 MemoryRole.TOOL,
                 defer_budget=True,
                 tool_call_id=tc_id,
                 tool_name=tc_name,
+                context_protected=bool(response_metadata.get("context_protected")),
+                skill_name=response_metadata.get("skill_name"),
+                skill_directory=response_metadata.get("skill_directory"),
               )
           session._last_tool_result = last_local_result  # type: ignore[attr-defined]
 

@@ -70,7 +70,12 @@ from nonoka.core.runtime import (
   WorkspaceMutationRule,
   VerificationPassedRule,
 )
-from nonoka.core.memory import ContextBudget, ContextCompactor, ContextMetrics, ProtocolAwareContextCompactor
+from nonoka.core.memory import (
+  ContextBudget,
+  ContextCompactor,
+  ContextMetrics,
+  ProtocolAwareContextCompactor,
+)
 from nonoka.core.external_mcp import (
   ExternalMCPRegistry,
   ExternalMCPServer,
@@ -81,7 +86,7 @@ from nonoka.core.external_skill import (
   ExternalSkillRegistry,
   ExternalSkillToolDefinition,
 )
-from nonoka.skills import Skill, SkillLoader, SkillRegistry
+from nonoka.skills import CompositeSkillRegistry, Skill, SkillLoader, SkillRegistry
 from nonoka.tools import load_skill
 from nonoka.observability import (
   EventStore,
@@ -185,6 +190,7 @@ __all__ = [
   "Skill",
   "SkillLoader",
   "SkillRegistry",
+  "CompositeSkillRegistry",
   "load_skill",
   # Hot reload
   "PluginManager",
@@ -195,11 +201,14 @@ def __getattr__(name: str):
   """Lazy import of Runner to keep ``import nonoka`` lightweight."""
   if name == "Runner":
     from nonoka.core.runner import Runner
+
     return Runner
   if name == "ToolRegistry":
     from nonoka.core.registry import ToolRegistry
+
     return ToolRegistry
   if name == "PluginManager":
     from nonoka.core.hot_reload import PluginManager
+
     return PluginManager
   raise AttributeError(f"module 'nonoka' has no attribute '{name}'")

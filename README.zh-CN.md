@@ -356,7 +356,7 @@ agent = AgentBuilder().model("gpt-4o").tools(registry).build()
 ```python
 from nonoka import AgentBuilder, Skill
 
-skill = Skill.from_file("skills/code-review.md")
+skill = Skill.from_file(".agents/skills/code-review/SKILL.md")
 
 agent = (
     AgentBuilder()
@@ -386,7 +386,9 @@ agent = (
 )
 ```
 
-`load_skill` 工具会以 system message 的形式，将所选技能的 `system_prompt` 和 `activation_prompt` 注入对话中。
+Skill 使用 Agent Skills 标准目录 `<skill-root>/<skill-name>/SKILL.md`。项目级 `.agents/skills` 中的同名 skill 会覆盖用户级 `~/.agents/skills`；旧的扁平 `skills/<name>.md` 文件仍保留兼容。
+
+`load_skill` 工具会把所选指南、skill 根目录以及随附的 `scripts/`、`references/`、`assets/` 路径作为受上下文压缩保护的工具结果返回。发现阶段只读取 skill 元数据；已启用 skill 声明的工具会在构建运行时工具目录时解析，而完整指南仍会延迟到激活时加载。
 
 ### MCP 服务器
 

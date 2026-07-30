@@ -107,6 +107,24 @@ class ProtocolAwareContextCompactor:
       index += 1
     return not expected or expected.issubset(actual)
 
+  @classmethod
+  def _unit_end(cls, entries: list[MemoryEntry], start: int) -> int:
+    """Return the exclusive end of one provider protocol unit."""
+    end = start + 1
+    entry = entries[start]
+    if entry.role != MemoryRole.ASSISTANT or not cls._tool_calls(entry):
+      return end
+    while end < len(entries) and entries[end].role == MemoryRole.TOOL:
+      end += 1
+    return end
+
+  @classmethod
+  def _is_protected_unit(cls, entries: list[MemoryEntry], start: int) -> bool:
+    return any(
+      entry.metadata.get("context_protected")
+      for entry in entries[start:cls._unit_end(entries, start)]
+    )
+
   @staticmethod
   def _preview(content: str) -> str:
     if len(content) <= 800:
@@ -168,12 +186,22 @@ class ProtocolAwareContextCompactor:
     removed: list[MemoryEntry] = []
 
     while chat_entries and not self._within(self._metrics(system_entries + chat_entries), budget):
-      start = 1 if chat_entries[0] is latest_user else 0
-      if start >= len(chat_entries) or not self._is_complete_unit(chat_entries, start):
+      start = 0
+      while start < len(chat_entries):
+        if chat_entries[start] is latest_user:
+          start = self._unit_end(chat_entries, start)
+          continue
+        if not self._is_complete_unit(chat_entries, start):
+          start = self._unit_end(chat_entries, start)
+          continue
+        if self._is_protected_unit(chat_entries, start):
+          start = self._unit_end(chat_entries, start)
+          continue
+        break
+      if start >= len(chat_entries):
         break
       removed.extend(_pop_protocol_unit(chat_entries, start))
 
-    ledger_source = previous_ledgers + removed
     ledger_items: list[dict[str, Any]] = []
     for entry in previous_ledgers:
       _, _, payload = entry.content.partition("\n")

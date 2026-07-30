@@ -6,6 +6,7 @@ import pytest
 
 from nonoka import (
   AgentBuilder,
+  CompositeSkillRegistry,
   ExternalSkill,
   ExternalSkillRegistry,
   ExternalSkillToolDefinition,
@@ -96,10 +97,11 @@ async def test_external_skill_registry_load_skill_injects_prompt():
   session = await runner._create_session(agent, deps=None)
   ctx = RunContext(session=session)
   result = await load_skill(ctx, name="code-review")
-  assert "loaded" in result
-  assert "[Skill 'code-review' loaded]" in result
-  assert "You are a code reviewer." in result
-  assert "Review carefully." in result
+  assert "loaded" in result.data
+  assert '<skill_content name="code-review">' in result.data
+  assert "You are a code reviewer." in result.data
+  assert "Review carefully." in result.data
+  assert result.metadata["context_protected"] is True
 
   # Guidance is now returned in the tool result instead of being injected as a
   # system message, so no system memory entry is created for the skill.
@@ -170,3 +172,21 @@ def test_agent_builder_external_skill_registry():
 
   assert agent.metadata.get("_skill_manager") is registry
   assert "## Available Skills (external)" in agent.system_prompt
+
+
+def test_composite_skill_registry_keeps_all_sources(tmp_path):
+  from nonoka import SkillRegistry
+
+  (tmp_path / "local.md").write_text(
+    "---\nname: local\ndescription: Local skill.\n---\nLocal guidance.\n"
+  )
+  local = SkillRegistry(enabled=["local"], search_paths=[tmp_path])
+  external = ExternalSkillRegistry([
+    ExternalSkill(name="external", description="External skill."),
+  ])
+
+  composite = CompositeSkillRegistry([local, external])
+
+  assert {info.name for info in composite.enabled} == {"local", "external"}
+  assert composite.get_skill("local").activation_prompt == "Local guidance."
+  assert composite.get_skill("external").description == "External skill."

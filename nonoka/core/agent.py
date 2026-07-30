@@ -5,6 +5,8 @@ from typing import Generic, TypeVar, Any
 
 from nonoka.core.types import Capability, RetryPolicy, RunResult
 from nonoka.core.runtime import CompletionContract, RuntimeLimits
+from nonoka.core.registry import ToolRegistry
+from nonoka.skills.skill import Skill
 
 DepsT = TypeVar("DepsT")
 ResultT = TypeVar("ResultT")
@@ -38,8 +40,9 @@ class Agent(Generic[DepsT, ResultT]):
     runner = Runner()
     result = await runner.run_react(agent, "What's the weather in Beijing?")
   """
+
   model: str
-  tools: list[Capability] | "ToolRegistry" = field(default_factory=list)
+  tools: list[Capability] | ToolRegistry = field(default_factory=list)
   system_prompt: str = ""
 
   # Generic type hints for runtime type inference
@@ -65,7 +68,7 @@ class Agent(Generic[DepsT, ResultT]):
   extensions: list[Any] = field(default_factory=list)
 
   # Skills — pre-configured capability packages expanded at construction time
-  skills: list["Skill"] = field(default_factory=list)
+  skills: list[Skill] = field(default_factory=list)
 
   # Metadata for routing, observability, and platform integration
   metadata: dict[str, Any] = field(default_factory=dict)
@@ -269,6 +272,7 @@ class Agent(Generic[DepsT, ResultT]):
   def from_json(cls, path: str) -> "Agent[DepsT, ResultT]":
     """Construct an ``Agent`` from a JSON file."""
     import json
+
     with open(path, encoding="utf-8") as f:
       data = json.load(f)
     if not isinstance(data, dict):
@@ -291,5 +295,6 @@ class Agent(Generic[DepsT, ResultT]):
       **runner_kwargs: Passed to ``Runner`` constructor (e.g. ``checkpoint="redis"``).
     """
     from nonoka.core.runner import Runner
+
     runner = Runner(**runner_kwargs)
     return await runner.run_react(self, prompt, deps)
