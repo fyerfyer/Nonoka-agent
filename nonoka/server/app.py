@@ -67,7 +67,7 @@ def create_app(*, api_token: str | None = None, event_db: str | Path | None = No
     await asyncio.gather(*(task.future for task in tasks.values()), return_exceptions=True)
     await observability.close()
 
-  app = FastAPI(title="nonoka-agent", version="1.3.7", lifespan=lifespan)
+  app = FastAPI(title="nonoka-agent", version="1.3.8", lifespan=lifespan)
 
   async def authorize(authorization: str | None = Header(default=None)) -> None:
     if authorization is None or not hmac.compare_digest(authorization, f"Bearer {token}"):
