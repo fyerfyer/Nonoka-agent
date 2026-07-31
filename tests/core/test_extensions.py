@@ -245,6 +245,34 @@ async def test_tool_call_during_finalization_is_rejected_without_execution():
 
 
 @pytest.mark.asyncio
+async def test_non_streaming_finalization_rejects_textual_tool_markup_and_recovers():
+  class FinalizeOnly:
+    name = "finalize_only"
+
+    async def before_turn(self, _context):
+      return ExtensionDecision(
+        feedback="[Finalization turn] Return plain prose only.",
+        disable_tools=True,
+      )
+
+  runner = make_runner([
+    LLMResponse(content='<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="todowrite">'),
+    LLMResponse(content="verified and finished"),
+  ])
+  agent = Agent(
+    model="fake",
+    system_prompt="MANDATORY TODO WORKFLOW: always call todowrite.",
+    extensions=[FinalizeOnly()],
+    max_turns=3,
+  )
+
+  result = await runner.run_react(agent, "finish", deps=None)
+
+  assert result.success is True
+  assert result.data == "verified and finished"
+
+
+@pytest.mark.asyncio
 async def test_streaming_finalization_suppresses_hallucinated_host_tool_and_recovers():
   observed_tools = []
 
@@ -288,6 +316,64 @@ async def test_streaming_finalization_suppresses_hallucinated_host_tool_and_reco
   assert events[-1].data["data"] == "finished"
   assert not any(event.type.startswith("tool_call") for event in events)
   assert observed_tools == [None, None]
+
+
+@pytest.mark.asyncio
+async def test_streaming_finalization_suppresses_textual_tool_markup_and_recovers():
+  observed_messages = []
+
+  class FinalizeOnly:
+    name = "finalize_only"
+
+    async def before_turn(self, _context):
+      return ExtensionDecision(
+        feedback="[Finalization turn] Return plain prose only.",
+        disable_tools=True,
+      )
+
+  class Provider:
+    calls = 0
+
+    async def chat_stream(self, **kwargs):
+      observed_messages.append(kwargs["messages"])
+      self.calls += 1
+      if self.calls == 1:
+        yield LLMStreamChunk(
+          content_delta=(
+            '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="bash">'
+            'pytest</｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>'
+          )
+        )
+      else:
+        yield LLMStreamChunk(content_delta="verified and finished")
+      yield LLMStreamChunk(finish_reason="stop")
+
+  runner = Runner(checkpoint="memory", memory="in_memory")
+  runner._create_llm = lambda _agent: Provider()  # type: ignore[method-assign]
+  agent = Agent(
+    model="fake",
+    system_prompt="MANDATORY TODO WORKFLOW: always call todowrite.",
+    extensions=[FinalizeOnly()],
+    max_turns=3,
+  )
+
+  events = [event async for event in runner.run_react_stream(agent, "finish", deps=None)]
+
+  content = "".join(
+    event.data["content"] for event in events if event.type == "content_delta"
+  )
+  assert content == "verified and finished"
+  assert events[-1].type == "final"
+  assert events[-1].data["data"] == "verified and finished"
+  assert all(
+    "MANDATORY TODO WORKFLOW" not in message.content
+    for request in observed_messages
+    for message in request
+  )
+  assert any(
+    "[Finalization correction]" in message.content
+    for message in observed_messages[1]
+  )
 
 
 def test_extension_names_must_be_unique():

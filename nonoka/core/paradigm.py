@@ -36,6 +36,10 @@ from nonoka.core.extensions import LoopExtension, LoopExtensionContext, LoopExte
 _logger = get_logger("nonoka.paradigm")
 
 _TOOL_CALL_PROGRESS_INTERVAL_CHARS = 1024
+_TOOL_CALL_MARKUP_RE = re.compile(
+  r"(?:DSML.{0,32}(?:tool_calls|invoke)|<tool_call|<function_calls)",
+  re.IGNORECASE | re.DOTALL,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -132,7 +136,11 @@ class ReActAgent:
 
         # Build messages from memory (or directly from prompt if no memory)
         if session.memory is not None:
-          messages = self._build_messages(session)
+          messages = (
+            self._build_tool_free_finalization_messages(session, start_decision.feedback)
+            if start_decision.disable_tools
+            else self._build_messages(session)
+          )
         else:
           messages = []
           if session.agent.system_prompt:
@@ -224,7 +232,12 @@ class ReActAgent:
           has_tool_calls=bool(response.tool_calls),
         )
 
-        if start_decision.disable_tools and response.tool_calls:
+        markup_tool_call = bool(
+          start_decision.disable_tools
+          and response.content
+          and _TOOL_CALL_MARKUP_RE.search(response.content)
+        )
+        if start_decision.disable_tools and (response.tool_calls or markup_tool_call):
           state = session.extension_state.setdefault("tool_free_finalization", {})
           rejected = int(state.get("rejected_tool_calls", 0))
           if rejected >= 1:
@@ -237,7 +250,10 @@ class ReActAgent:
           if session.memory is not None:
             await session.memory.add(
               "[Finalization correction] The attempted tool call was rejected and was not "
-              "executed. Tools remain disabled. Return the final answer now without any tool call.",
+              "executed. The focused verification receipt already proves completion, even if "
+              "an earlier TODO snapshot says in-progress. Tools remain disabled: do not call "
+              "todowrite, bash, or any other tool and do not emit tool-call markup. Reply now "
+              "with plain-prose final summary only.",
               MemoryRole.SYSTEM,
             )
           await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -968,7 +984,11 @@ class ReActAgent:
 
         # Build messages from memory (or directly from prompt if no memory)
         if session.memory is not None:
-          messages = self._build_messages(session)
+          messages = (
+            self._build_tool_free_finalization_messages(session, start_decision.feedback)
+            if start_decision.disable_tools
+            else self._build_messages(session)
+          )
         else:
           messages = []
           if session.agent.system_prompt:
@@ -1032,7 +1052,8 @@ class ReActAgent:
                 streamed_usage.update(usage)
               if chunk.content_delta:
                 accumulated_content += chunk.content_delta
-                yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
+                if not start_decision.disable_tools:
+                  yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
               if chunk.tool_call_deltas:
                 self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
                 if not start_decision.disable_tools:
@@ -1050,7 +1071,8 @@ class ReActAgent:
                   streamed_usage.update(usage)
                 if chunk.content_delta:
                   accumulated_content += chunk.content_delta
-                  yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
+                  if not start_decision.disable_tools:
+                    yield StreamEvent(type="content_delta", data={"content": chunk.content_delta})
                 if chunk.tool_call_deltas:
                   self._accumulate_tool_deltas(accumulated_tool_calls, chunk.tool_call_deltas)
                   if not start_decision.disable_tools:
@@ -1097,7 +1119,12 @@ class ReActAgent:
           has_tool_calls=bool(tool_calls),
         )
 
-        if start_decision.disable_tools and response.tool_calls:
+        markup_tool_call = bool(
+          start_decision.disable_tools
+          and response.content
+          and _TOOL_CALL_MARKUP_RE.search(response.content)
+        )
+        if start_decision.disable_tools and (response.tool_calls or markup_tool_call):
           state = session.extension_state.setdefault("tool_free_finalization", {})
           rejected = int(state.get("rejected_tool_calls", 0))
           if rejected >= 1:
@@ -1114,7 +1141,10 @@ class ReActAgent:
           if session.memory is not None:
             await session.memory.add(
               "[Finalization correction] The attempted tool call was rejected and was not "
-              "executed. Tools remain disabled. Return the final answer now without any tool call.",
+              "executed. The focused verification receipt already proves completion, even if "
+              "an earlier TODO snapshot says in-progress. Tools remain disabled: do not call "
+              "todowrite, bash, or any other tool and do not emit tool-call markup. Reply now "
+              "with plain-prose final summary only.",
               MemoryRole.SYSTEM,
             )
           await runner.checkpoint_store.save_session(session.session_id, session.to_state())
@@ -1168,6 +1198,8 @@ class ReActAgent:
             if session.start_time is not None
             else None
           )
+          if start_decision.disable_tools and content:
+            yield StreamEvent(type="content_delta", data={"content": content})
           yield StreamEvent(
             type="final",
             data={
@@ -1683,6 +1715,54 @@ class ReActAgent:
         messages.append(LLMMessage(**kwargs))
 
     return messages
+
+  def _build_tool_free_finalization_messages(
+    self,
+    session: Session,
+    feedback: str | None,
+  ) -> list[LLMMessage]:
+    """Build a compact final-answer context without executable history.
+
+    A tool-free finalization turn must not replay either the normal system
+    prompt or assistant/tool-call history: both can instruct or prime the model
+    to continue an action whose authority has already closed. Preserve the
+    original user goal and the host-attested latest verification receipt so the
+    summary remains grounded without exposing another executable trajectory.
+    """
+    corrections: list[str] = []
+    user_requests: list[str] = []
+    if session.memory is not None:
+      corrections.extend(
+        entry.content
+        for entry in session.memory.entries
+        if entry.role == MemoryRole.SYSTEM
+        and entry.content.startswith("[Finalization correction]")
+      )
+      user_requests.extend(
+        entry.content for entry in session.memory.entries if entry.role == MemoryRole.USER
+      )
+    instruction = "\n\n".join(
+      part for part in [feedback, *corrections] if part
+    ) or (
+      "[Finalization turn] Tools are disabled. Return a plain-prose final answer "
+      "grounded in the user request and tool evidence."
+    )
+    runtime_state = getattr(session, "runtime_state", None)
+    usage = getattr(runtime_state, "usage", None)
+    verification = getattr(usage, "latest_verification", None)
+    evidence = (
+      json.dumps(verification, ensure_ascii=False, sort_keys=True)
+      if isinstance(verification, dict)
+      else "The configured completion contract is satisfied."
+    )
+    request = "\n\n".join(user_requests) or "Summarize the completed task."
+    return [
+      LLMMessage(role=LLMMessageRole.SYSTEM, content=instruction),
+      LLMMessage(
+        role=LLMMessageRole.USER,
+        content=f"{request}\n\n[Host-attested completion evidence]\n{evidence}",
+      ),
+    ]
 
   def _capability_for_call(self, session: Session, tool_call: dict[str, Any]) -> Any | None:
     name = tool_call.get("function", {}).get("name", "")

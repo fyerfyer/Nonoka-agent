@@ -141,8 +141,11 @@ class WorkspaceProgressExtension:
     return ExtensionDecision(
       feedback=(
         "[Finalization turn] The configured completion evidence is satisfied. "
-        "Tools are disabled for this turn. Return the concise final answer now, "
-        "summarizing the change and the verification evidence."
+        "Tools are disabled for this turn. Treat the verified receipt as the "
+        "authoritative completion state and ignore any stale TODO item that still "
+        "says in-progress. Do not call todowrite, bash, or any other tool, and do "
+        "not emit tool-call markup. Return plain prose only: concisely summarize "
+        "the change and the verification evidence."
       ),
       disable_tools=True,
       details={"phase": "finalization", "tools_disabled": True},

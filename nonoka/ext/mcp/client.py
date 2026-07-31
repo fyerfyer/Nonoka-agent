@@ -231,7 +231,7 @@ class MCPClient:
     """Call an MCP tool by name."""
     result: CallToolResult = await self.session.call_tool(name, arguments=arguments)
 
-    if result.isError:
+    if getattr(result, "is_error", getattr(result, "isError", False)):
       # Extract error text from content
       error_text = ""
       for item in result.content:
@@ -272,7 +272,13 @@ class MCPCapability(Capability):
   @property
   def parameters(self) -> dict[str, Any]:
     """Return JSON Schema for the tool's input parameters."""
-    return self._tool.inputSchema or {"type": "object", "properties": {}}
+    # MCP Python SDK 2.0 exposes Pydantic fields as snake_case while keeping
+    # the protocol's camelCase names as validation aliases. Older releases
+    # exposed the camelCase attribute directly, so accept both forms.
+    schema = getattr(self._tool, "input_schema", None)
+    if schema is None:
+      schema = getattr(self._tool, "inputSchema", None)
+    return schema or {"type": "object", "properties": {}}
 
   async def invoke(self, ctx: RunContext, arguments: dict[str, Any]) -> Any:
     return await self._client.call_tool(self._tool.name, arguments)
