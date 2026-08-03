@@ -1,8 +1,14 @@
 import asyncio
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from nonoka.core.memory import WorkingMemory, MemoryRole
+from nonoka.core.memory import (
+  MemoryEntry,
+  WorkingMemory,
+  MemoryRole,
+  microcompact_superseded_tool_results,
+)
 from nonoka.core.runtime import RuntimeLimits
 from nonoka.backends.memory.in_memory import InMemoryBackend
 from nonoka.core.llm import LLMResponse
@@ -241,6 +247,213 @@ async def test_working_memory_rag_integration():
 
   assert len(system_entries) == 2  # Original System + RAG System
   assert any("blue" in e.content for e in system_entries)
+
+
+# --------------------------------------------------------------------------- #
+# Microcompaction — superseded tool results
+# --------------------------------------------------------------------------- #
+
+def _read_call(call_id: str, path: str) -> dict:
+  return {
+    "id": call_id,
+    "function": {"name": "Read", "arguments": json.dumps({"file_path": path})},
+  }
+
+
+def _read_entries(path_a: str, path_b: str) -> list[MemoryEntry]:
+  return [
+    MemoryEntry(role=MemoryRole.USER, content="task", tokens=4),
+    MemoryEntry(
+      role=MemoryRole.ASSISTANT, content="", tokens=1,
+      metadata={"tool_calls": [_read_call("c1", path_a)]},
+    ),
+    MemoryEntry(
+      role=MemoryRole.TOOL, content="old-content", tokens=11,
+      metadata={"tool_call_id": "c1"},
+    ),
+    MemoryEntry(
+      role=MemoryRole.ASSISTANT, content="", tokens=1,
+      metadata={"tool_calls": [_read_call("c2", path_b)]},
+    ),
+    MemoryEntry(
+      role=MemoryRole.TOOL, content="new-content", tokens=11,
+      metadata={"tool_call_id": "c2"},
+    ),
+  ]
+
+
+def test_microcompact_supersedes_duplicate_read_results():
+  """Only the newest result for the same logical call keeps its content."""
+  entries = _read_entries("/a.py", "/a.py")
+  result = microcompact_superseded_tool_results(entries, len)
+
+  # Entries are never removed — assistant/tool protocol units stay intact.
+  assert len(result) == len(entries)
+  old, new = result[2], result[4]
+  assert old.content == "[superseded by newer read result]"
+  assert old.metadata["superseded"] is True
+  assert old.tokens == len(old.content)
+  assert new.content == "new-content"
+  assert "superseded" not in new.metadata
+
+
+def test_microcompact_keeps_results_for_different_paths():
+  entries = _read_entries("/a.py", "/b.py")
+  result = microcompact_superseded_tool_results(entries, len)
+
+  assert result[2].content == "old-content"
+  assert result[4].content == "new-content"
+
+
+def test_microcompact_skips_entries_without_reliable_arguments():
+  """Results whose call arguments cannot be determined are left untouched."""
+  entries = [
+    MemoryEntry(role=MemoryRole.USER, content="task", tokens=4),
+    MemoryEntry(
+      role=MemoryRole.TOOL, content="first", tokens=5,
+      metadata={"tool_call_id": "missing-call"},
+    ),
+    MemoryEntry(
+      role=MemoryRole.TOOL, content="second", tokens=6,
+      metadata={"tool_call_id": "missing-call"},
+    ),
+  ]
+  result = microcompact_superseded_tool_results(entries, len)
+
+  assert [entry.content for entry in result] == ["task", "first", "second"]
+
+
+@pytest.mark.asyncio
+async def test_enforce_budget_microcompacts_before_compacting():
+  """A superseded duplicate result can bring the window back under budget."""
+  memory = WorkingMemory(
+    session_id="micro", max_tokens=100, token_counter=len,
+    reserve_output_tokens=10, compaction_buffer_tokens=5,
+  )
+  await memory.add("do the task", MemoryRole.USER)
+  await memory.add(
+    "", MemoryRole.ASSISTANT, defer_budget=True,
+    tool_calls=[_read_call("c1", "/a.py")],
+  )
+  await memory.add("r" * 50, MemoryRole.TOOL, defer_budget=True, tool_call_id="c1")
+  await memory.add(
+    "", MemoryRole.ASSISTANT, defer_budget=True,
+    tool_calls=[_read_call("c2", "/a.py")],
+  )
+  await memory.add("r" * 50, MemoryRole.TOOL, defer_budget=True, tool_call_id="c2")
+  await memory.enforce_budget()
+
+  # Microcompaction alone got under the trigger: nothing was evicted and no
+  # evidence ledger had to be created.
+  assert len(memory.entries) == 5
+  contents = [entry.content for entry in memory.entries]
+  assert "[superseded by newer read result]" in contents
+  assert not any(entry.metadata.get("evidence_ledger") for entry in memory.entries)
+
+
+# --------------------------------------------------------------------------- #
+# Early trigger threshold and output reserve
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_enforce_budget_triggers_before_cap_and_reserves_output():
+  """Compaction starts at ``max_tokens - buffer`` and trims to ``- reserve``."""
+  memory = WorkingMemory(
+    session_id="threshold", max_tokens=100, token_counter=len,
+    reserve_output_tokens=20, compaction_buffer_tokens=10,
+  )
+  await memory.add("s" * 50, MemoryRole.SYSTEM)
+  # Total is 94 — under the raw cap (100) but over the trigger (90).
+  await memory.add("u" * 20, MemoryRole.USER, defer_budget=True)
+  await memory.add("a" * 24, MemoryRole.ASSISTANT)
+
+  total = sum(entry.tokens for entry in memory.entries)
+  assert total <= 80  # max_tokens - reserve_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_enforce_budget_no_trigger_below_buffer_threshold():
+  memory = WorkingMemory(
+    session_id="below-trigger", max_tokens=100, token_counter=len,
+    reserve_output_tokens=20, compaction_buffer_tokens=10,
+  )
+  await memory.add("s" * 50, MemoryRole.SYSTEM)
+  await memory.add("u" * 20, MemoryRole.USER, defer_budget=True)
+  # Total is 90 — exactly at the trigger, so nothing is compacted.
+  await memory.add("a" * 20, MemoryRole.ASSISTANT)
+
+  assert [entry.content for entry in memory.entries] == [
+    "s" * 50, "u" * 20, "a" * 20,
+  ]
+
+
+# --------------------------------------------------------------------------- #
+# Summary layer — circuit breaker and widened range
+# --------------------------------------------------------------------------- #
+
+class FailingLLMProvider:
+  """Summary LLM that always raises, for circuit-breaker tests."""
+
+  def __init__(self):
+    self.call_count = 0
+
+  async def chat(self, messages, **kwargs):
+    self.call_count += 1
+    raise RuntimeError("summary backend down")
+
+
+@pytest.mark.asyncio
+async def test_summary_circuit_breaker_falls_back_to_ledger_compaction():
+  """Three consecutive summary failures disable summarisation for the session."""
+  llm = FailingLLMProvider()
+  memory = WorkingMemory(
+    session_id="breaker", max_tokens=100, token_counter=len,
+    summary_llm=llm, reserve_output_tokens=10, compaction_buffer_tokens=0,
+  )
+  # Spy on the deterministic compactor to observe summary fallbacks. (The
+  # ledger entry itself may legitimately be dropped again when it does not
+  # fit the budget — that is pre-existing compactor behavior.)
+  compactor_spy = AsyncMock(wraps=memory.context_compactor.compact)
+  memory.context_compactor.compact = compactor_spy
+
+  async def overflow(index: int) -> None:
+    for suffix in ("a", "b"):
+      await memory.add(f"user-{index}-{suffix}", MemoryRole.USER, defer_budget=True)
+      await memory.add("x" * 200, MemoryRole.ASSISTANT, defer_budget=True)
+    await memory.enforce_budget()
+
+  for round_index in range(4):
+    await overflow(round_index)
+
+  # The summariser was attempted exactly three times, then the breaker opened.
+  assert llm.call_count == 3
+  assert memory._summary_disabled is True
+  # Every failure fell back to the deterministic ledger compactor, and the
+  # fourth overflow used it directly without calling the summariser.
+  assert compactor_spy.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_summary_covers_oldest_third_of_chat_history():
+  """The summary range widened from the oldest ~5 to the oldest ~1/3."""
+  mock_llm = MockLLMProvider()
+  memory = WorkingMemory(
+    session_id="summary-range", max_tokens=200, token_counter=len,
+    summary_llm=mock_llm, reserve_output_tokens=10, compaction_buffer_tokens=0,
+  )
+  await memory.add("sys", MemoryRole.SYSTEM)
+  for i in range(24):
+    await memory.add(f"message-{i:02d} " + "x" * 40, MemoryRole.USER, defer_budget=True)
+  await memory.enforce_budget()
+
+  assert mock_llm.call_count == 1
+  prompt = mock_llm.last_messages[0].content
+  # 24 chat entries → oldest 8 summarised; the old ~5 cap would have stopped
+  # before message-05.
+  assert "message-00" in prompt
+  assert "message-05" in prompt
+  assert "message-07" in prompt
+  assert "message-08" not in prompt
 
 
 @pytest.mark.live

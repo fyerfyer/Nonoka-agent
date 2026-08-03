@@ -33,6 +33,9 @@ class RuntimeLimits(BaseModel):
   max_context_bytes: int | None = Field(default=None, ge=1)
   max_context_tokens: int | None = Field(default=None, ge=1)
   max_tool_messages: int | None = Field(default=None, ge=1)
+  reserve_output_tokens: int | None = Field(default=None, ge=1)
+  compaction_buffer_tokens: int | None = Field(default=None, ge=0)
+  summary_enabled: bool = False
   max_external_result_bytes: int | None = Field(default=None, ge=1)
   max_total_tokens: int | None = Field(default=None, ge=1)
   max_cost_usd: float | None = Field(default=None, gt=0)

@@ -379,10 +379,23 @@ class Runner:
     state = await self.checkpoint_store.load_session(session_id) if session_id is not None else None
     persisted_limits = getattr(getattr(state, "runtime_state", None), "limits", None)
     configured_limits = persisted_limits or getattr(agent, "runtime_limits", None)
+    # ``compaction_buffer_tokens=0`` is a legitimate override, so unlike the
+    # other fallbacks it cannot use ``or``.
+    buffer_tokens = getattr(configured_limits, "compaction_buffer_tokens", None)
+    summary_llm = (
+      self._ensure_llm(agent)
+      if getattr(configured_limits, "summary_enabled", False)
+      else None
+    )
     memory = WorkingMemory(
       session_id=sid,
       memory_backend=self.memory_backend,
       max_tokens=(getattr(configured_limits, "max_context_tokens", None) or 8192),
+      summary_llm=summary_llm,
+      reserve_output_tokens=(
+        getattr(configured_limits, "reserve_output_tokens", None) or 4096
+      ),
+      compaction_buffer_tokens=buffer_tokens if buffer_tokens is not None else 2048,
     )
 
     session = (
@@ -751,9 +764,16 @@ class Runner:
     memory = None
     if self.memory_backend is not None:
       from nonoka.core.memory import WorkingMemory
+      resumed_limits = getattr(getattr(state, "runtime_state", None), "limits", None)
+      summary_llm = (
+        self._ensure_llm(agent)
+        if getattr(resumed_limits, "summary_enabled", False)
+        else None
+      )
       memory = WorkingMemory(
         session_id=session_id,
         memory_backend=self.memory_backend,
+        summary_llm=summary_llm,
       )
 
     session = Session.from_state(state, agent, deps=deps, memory=memory)

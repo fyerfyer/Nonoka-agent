@@ -344,6 +344,98 @@ def _latest_user_entry(entries: list[MemoryEntry]) -> MemoryEntry | None:
 
 
 # --------------------------------------------------------------------------- #
+# Microcompaction — superseded tool results
+# --------------------------------------------------------------------------- #
+
+_READ_TOOLS = {"read", "read_file", "view"}
+_SEARCH_TOOLS = {"grep", "glob", "grep_files", "search_files"}
+_SHELL_TOOLS = {"bash", "shell", "execute_command", "run_command"}
+
+
+def _tool_call_arguments(entries: list[MemoryEntry]) -> dict[str, tuple[str, dict[str, Any]]]:
+  """Map ``tool_call_id`` to ``(tool name, parsed arguments)`` from assistants."""
+  calls: dict[str, tuple[str, dict[str, Any]]] = {}
+  for entry in entries:
+    if entry.role != MemoryRole.ASSISTANT:
+      continue
+    for call in ProtocolAwareContextCompactor._tool_calls(entry):
+      call_id = call.get("id") or call.get("tool_call_id")
+      function = call.get("function") if isinstance(call.get("function"), dict) else {}
+      name = function.get("name")
+      arguments = function.get("arguments")
+      if isinstance(arguments, str):
+        try:
+          arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+          arguments = None
+      if call_id and name:
+        calls[str(call_id)] = (str(name), arguments if isinstance(arguments, dict) else {})
+  return calls
+
+
+def _superseded_key(tool_name: str, arguments: dict[str, Any]) -> tuple[str, ...] | None:
+  """Logical dedup key for one tool result, or ``None`` when unreliable."""
+  name = tool_name.lower()
+  if name in _READ_TOOLS:
+    path = arguments.get("file_path") or arguments.get("path")
+    return (name, str(path)) if path else None
+  if name in _SEARCH_TOOLS:
+    pattern = arguments.get("pattern")
+    if not pattern:
+      return None
+    return (name, str(pattern), str(arguments.get("path") or ""))
+  if name in _SHELL_TOOLS:
+    command = arguments.get("command")
+    return (name, str(command)[:200]) if command else None
+  return None
+
+
+def microcompact_superseded_tool_results(
+  entries: list[MemoryEntry],
+  count_tokens: Callable[[str], int] = _default_count_tokens,
+) -> list[MemoryEntry]:
+  """Replace superseded duplicate tool results with a short placeholder.
+
+  Repeating the same logical tool call (e.g. Read on the same file) makes
+  every result but the newest stale.  Older contents are replaced in place —
+  entries are never removed — so assistant/tool protocol units stay intact.
+  Results without reliable call arguments are left untouched.
+  """
+  call_args = _tool_call_arguments(entries)
+  keys: list[tuple[str, ...] | None] = []
+  for entry in entries:
+    key: tuple[str, ...] | None = None
+    if entry.role == MemoryRole.TOOL and not entry.metadata.get("superseded"):
+      call_id = str(entry.metadata.get("tool_call_id") or "")
+      name, arguments = call_args.get(
+        call_id, (entry.metadata.get("tool_name"), {}),
+      )
+      if name:
+        key = _superseded_key(str(name), arguments)
+    keys.append(key)
+
+  latest: dict[tuple[str, ...], int] = {}
+  for index, key in enumerate(keys):
+    if key is not None:
+      latest[key] = index
+
+  result = list(entries)
+  for index, key in enumerate(keys):
+    if key is None or latest[key] == index:
+      continue
+    entry = result[index]
+    placeholder = f"[superseded by newer {key[0]} result]"
+    metadata = dict(entry.metadata)
+    metadata["superseded"] = True
+    result[index] = entry.model_copy(update={
+      "content": placeholder,
+      "tokens": count_tokens(placeholder),
+      "metadata": metadata,
+    })
+  return result
+
+
+# --------------------------------------------------------------------------- #
 # WorkingMemory
 # --------------------------------------------------------------------------- #
 
@@ -356,9 +448,14 @@ class WorkingMemory:
 
   Budget strategy (sliding-window vs summarisation) is chosen automatically:
 
-  * No ``summary_llm`` → pure sliding-window eviction.
-  * With ``summary_llm`` → sliding-window + automatic summary when the
-    window grows too large.
+  * No ``summary_llm`` → deterministic protocol-aware compaction.
+  * With ``summary_llm`` → automatic summary of the oldest history when the
+    window grows too large (falls back to deterministic compaction after
+    repeated summariser failures).
+
+  Every budget check first microcompacts superseded duplicate tool results,
+  triggers ``compaction_buffer_tokens`` before the cap, and compacts down to
+  ``max_tokens - reserve_output_tokens``.
   """
 
   def __init__(
@@ -369,6 +466,8 @@ class WorkingMemory:
     summary_llm: "Any | None" = None,
     token_counter: "callable[[str], int] | None" = None,
     context_compactor: ContextCompactor | None = None,
+    reserve_output_tokens: int = 4096,
+    compaction_buffer_tokens: int = 2048,
   ):
     self.session_id = session_id
     self.backend = memory_backend
@@ -376,7 +475,14 @@ class WorkingMemory:
     self.summary_llm = summary_llm
     self._token_counter = token_counter or _default_count_tokens
     self.context_compactor = context_compactor or ProtocolAwareContextCompactor()
+    self.reserve_output_tokens = reserve_output_tokens
+    self.compaction_buffer_tokens = compaction_buffer_tokens
     self.entries: list[MemoryEntry] = []
+
+    # Circuit breaker: after three consecutive summary failures this session
+    # stops calling the summariser and uses the deterministic compactor.
+    self._summary_failures = 0
+    self._summary_disabled = False
 
     # Safe background-write bookkeeping: each backend.add() is wrapped in
     # an asyncio task so exceptions are logged (not swallowed) and pending
@@ -386,15 +492,33 @@ class WorkingMemory:
   def _count_tokens(self, content: str) -> int:
     return self._token_counter(content)
 
+  def _compaction_target(self) -> int:
+    """Token target for one compaction pass.
+
+    A tiny ``max_tokens`` cannot hold the reserve; clamp to the raw cap so
+    the budget stays reachable instead of aiming at a negative target.
+    """
+    target = self.max_tokens - self.reserve_output_tokens
+    return target if target > 0 else self.max_tokens
+
   async def _enforce_budget(self) -> None:
-    """Evict oldest non-system entries until we are under ``max_tokens``."""
+    """Compact the window once it comes within ``compaction_buffer_tokens``
+    of ``max_tokens``, trimming down to ``max_tokens - reserve_output_tokens``
+    so the next model response has room.
+    """
+    # Microcompaction first: superseded duplicate tool results are cheap
+    # wins that often make real compaction unnecessary.
+    self.entries = microcompact_superseded_tool_results(self.entries, self._count_tokens)
     total = sum(e.tokens for e in self.entries)
-    if total <= self.max_tokens:
+    target = self._compaction_target()
+    # Clamp the trigger at the target so a buffer larger than the reserve
+    # cannot cause repeated no-progress compaction passes.
+    if total <= max(self.max_tokens - self.compaction_buffer_tokens, target):
       return
 
-    if self.summary_llm is None:
+    if self.summary_llm is None or self._summary_disabled:
       result = await self.context_compactor.compact(
-        list(self.entries), ContextBudget(max_tokens=self.max_tokens), self._count_tokens,
+        list(self.entries), ContextBudget(max_tokens=target), self._count_tokens,
       )
       self.entries = result.entries
       return
@@ -405,10 +529,10 @@ class WorkingMemory:
 
     # If we have a summary_llm and enough chat history, summarise instead
     # of blindly dropping.
-    if self.summary_llm and len(chat_entries) > 2:
-      await self._summarise_and_compress(system_entries, chat_entries)
+    if len(chat_entries) > 2:
+      await self._summarise_and_compress(system_entries, chat_entries, target)
     else:
-      while chat_entries and total > self.max_tokens:
+      while chat_entries and total > target:
         # An assistant tool-call message and every one of its tool responses
         # form one protocol unit.  Evicting only the assistant leaves orphaned
         # ``role=tool`` messages, which OpenAI-compatible APIs reject on the
@@ -429,13 +553,16 @@ class WorkingMemory:
     self,
     system_entries: list[MemoryEntry],
     chat_entries: list[MemoryEntry],
+    target: int,
   ) -> None:
     """Replace the oldest chunk of chat history with an LLM summary."""
     latest_user = _latest_user_entry(chat_entries)
     protected_prefix = 1 if chat_entries and chat_entries[0] is latest_user else 0
     available = chat_entries[protected_prefix:]
+    # Summarise roughly the oldest third of the chat history, rounded up to
+    # complete assistant/tool protocol units.
     num_to_summarise = _complete_protocol_prefix_length(
-      available, min(5, max(0, len(available) - 1)),
+      available, max(0, len(available) // 3),
     )
     to_summarise = available[:num_to_summarise]
     kept_chats = chat_entries[:protected_prefix] + available[num_to_summarise:]
@@ -444,7 +571,7 @@ class WorkingMemory:
     # active user task. Fall back to protocol-aware sliding-window trimming.
     if not to_summarise:
       total = sum(entry.tokens for entry in self.entries)
-      while chat_entries and total > self.max_tokens:
+      while chat_entries and total > target:
         start = 1 if chat_entries[0] is latest_user else 0
         if start >= len(chat_entries):
           break
@@ -460,7 +587,24 @@ class WorkingMemory:
     )
 
     from nonoka.core.llm import LLMMessage
-    response = await self.summary_llm.chat([LLMMessage(role="user", content=prompt)])
+    try:
+      response = await self.summary_llm.chat([LLMMessage(role="user", content=prompt)])
+    except Exception:
+      # A broken summariser must not break the session: count the failure
+      # towards the circuit breaker and fall back to deterministic
+      # ledger compaction.
+      self._summary_failures += 1
+      if self._summary_failures >= 3:
+        self._summary_disabled = True
+      _logger.exception("memory.summary_failed")
+      result = await self.context_compactor.compact(
+        system_entries + chat_entries,
+        ContextBudget(max_tokens=target),
+        self._count_tokens,
+      )
+      self.entries = result.entries
+      return
+    self._summary_failures = 0
 
     summary_content = response.content or ""
     summary_entry = MemoryEntry(
@@ -473,10 +617,10 @@ class WorkingMemory:
 
     # Re-check budget — the summary may still be too long.
     total = sum(e.tokens for e in self.entries)
-    if total > self.max_tokens:
+    if total > target:
       chat_entries_2 = [e for e in self.entries if e.role != MemoryRole.SYSTEM]
       system_entries_2 = [e for e in self.entries if e.role == MemoryRole.SYSTEM]
-      while chat_entries_2 and total > self.max_tokens:
+      while chat_entries_2 and total > target:
         latest_user_2 = _latest_user_entry(chat_entries_2)
         start = 1 if chat_entries_2[0] is latest_user_2 else 0
         if start >= len(chat_entries_2):
@@ -524,9 +668,12 @@ class WorkingMemory:
       await self._enforce_budget()
       return None
 
+    base_max_tokens = getattr(runtime_limits, "max_context_tokens", None) or self.max_tokens
+    # Reserve room for the next model response, mirroring _enforce_budget.
+    target = base_max_tokens - self.reserve_output_tokens
     budget = ContextBudget(
       max_bytes=getattr(runtime_limits, "max_context_bytes", None),
-      max_tokens=getattr(runtime_limits, "max_context_tokens", None) or self.max_tokens,
+      max_tokens=target if target > 0 else base_max_tokens,
       max_tool_messages=getattr(runtime_limits, "max_tool_messages", None),
     )
     result = await self.context_compactor.compact(
