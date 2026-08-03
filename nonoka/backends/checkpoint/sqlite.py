@@ -7,7 +7,13 @@ import traceback as _traceback
 from typing import Any
 
 from nonoka.core.checkpoint import CheckpointStore
-from nonoka.core.session import SessionState, StepStatus, StepResult, StepFailure
+from nonoka.core.session import (
+  SessionState,
+  StepStatus,
+  StepResult,
+  StepFailure,
+  migrate_session_state_dict,
+)
 
 
 class SQLiteCheckpointStore(CheckpointStore):
@@ -119,7 +125,7 @@ class SQLiteCheckpointStore(CheckpointStore):
       return obj
 
     restored = _restore_refs(raw)
-    return SessionState.model_validate(restored)
+    return SessionState.model_validate(migrate_session_state_dict(restored))
 
   # ------------------------------------------------------------------ #
   # Protocol implementation

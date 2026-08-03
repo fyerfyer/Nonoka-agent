@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from contextlib import suppress
 from enum import Enum
 from typing import Any, Callable
@@ -284,6 +285,51 @@ class AgentTool(Capability):
 
     return await self._run_child(ctx, runner, session, prompt)
 
+  def _lineage_key(self, prompt: str) -> str:
+    """Stable key identifying one sub-agent invocation in the lineage map."""
+    agent_id = getattr(self.agent, "name", None) or self.agent.model
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    return f"{agent_id}:{prompt_hash}"
+
+  async def _resume_child_session(
+    self,
+    ctx: RunContext,
+    runner: Any,
+    record: dict[str, Any],
+  ) -> Any | None:
+    """Rebuild a still-resumable child session from the checkpoint store.
+
+    Mirrors ``Runner.resume``: load the state, recreate WorkingMemory when a
+    memory backend is configured, then restore via ``Session.from_state``.
+    Returns ``None`` when the child is missing or already terminal.
+    """
+    from nonoka.core.session import Session, SessionStatus
+
+    child_session_id = record.get("child_session_id")
+    if not child_session_id:
+      return None
+    state = await runner.checkpoint_store.load_session(child_session_id)
+    if state is None or state.status in {
+      SessionStatus.COMPLETED, SessionStatus.FAILED, SessionStatus.CANCELLED,
+    }:
+      return None
+
+    memory = None
+    if getattr(runner, "memory_backend", None) is not None:
+      from nonoka.core.memory import WorkingMemory
+      resumed_limits = getattr(getattr(state, "runtime_state", None), "limits", None)
+      summary_llm = (
+        runner._ensure_llm(self.agent)
+        if getattr(resumed_limits, "summary_enabled", False)
+        else None
+      )
+      memory = WorkingMemory(
+        session_id=child_session_id,
+        memory_backend=runner.memory_backend,
+        summary_llm=summary_llm,
+      )
+    return Session.from_state(state, self.agent, deps=ctx.deps, memory=memory)
+
   async def _run_child(
     self,
     ctx: RunContext,
@@ -297,10 +343,46 @@ class AgentTool(Capability):
     the child's configured model selection and the Runner's session hooks, and
     it only observed parent cancellation before starting.  Keep the lightweight
     tool-based architecture while preserving those Runner invariants here.
+
+    A lineage record is kept in the parent's ``extension_state`` so a parent
+    crash does not orphan the child session: a ``running`` record whose child
+    is still resumable continues that session instead of starting a new one,
+    and a ``completed`` record returns the cached result text (a stringified
+    ``result.data``) without re-executing the sub-agent.
     """
     from nonoka.core.extensions import LoopExtensionContext, LoopExtensionManager
     from nonoka.core.hooks import HookContext
     from nonoka.core.paradigm import ReActAgent
+
+    lineage_key = self._lineage_key(prompt)
+    lineage = ctx.session.extension_state.setdefault("agent_tool_lineage", {})
+    record = lineage.get(lineage_key)
+    resumed = False
+    if isinstance(record, dict):
+      if record.get("status") == "completed":
+        # The child finished but the parent crashed before consuming the
+        # result — return the cached text instead of re-running.
+        del lineage[lineage_key]
+        await runner.checkpoint_store.save_session(
+          ctx.session.session_id, ctx.session.to_state()
+        )
+        return RunResult(success=True, data=record.get("result_text"), session=session)
+      if record.get("status") == "running":
+        resumed_session = await self._resume_child_session(ctx, runner, record)
+        if resumed_session is not None:
+          session = resumed_session
+          resumed = True
+    if not resumed:
+      lineage[lineage_key] = {
+        "child_session_id": session.session_id,
+        "status": "running",
+        "result_text": None,
+      }
+      # Persist the lineage record so a later parent resume can find the
+      # (possibly orphaned) child session.
+      await runner.checkpoint_store.save_session(
+        ctx.session.session_id, ctx.session.to_state()
+      )
 
     object.__setattr__(
       session,
@@ -338,7 +420,10 @@ class AgentTool(Capability):
     result: RunResult
     try:
       await runner.hooks.emit_session_start(hook_ctx)
-      result = await paradigm.run(session, runner, prompt=prompt)
+      if resumed:
+        result = await paradigm.resume(session, runner)
+      else:
+        result = await paradigm.run(session, runner, prompt=prompt)
 
       await LoopExtensionManager(list(getattr(self.agent, "extensions", []))).after_run(
         LoopExtensionContext(
@@ -352,10 +437,24 @@ class AgentTool(Capability):
       attach_trace = getattr(runner, "_attach_trace", None)
       if callable(attach_trace):
         result = attach_trace(result)
+      if result.success:
+        record = lineage.get(lineage_key)
+        if isinstance(record, dict):
+          record["status"] = "completed"
+          record["result_text"] = str(result.data)
+          await runner.checkpoint_store.save_session(
+            ctx.session.session_id, ctx.session.to_state()
+          )
       return result
     except asyncio.CancelledError:
       session.cancel()
       await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+      record = lineage.get(lineage_key)
+      if isinstance(record, dict):
+        record["status"] = "cancelled"
+        await runner.checkpoint_store.save_session(
+          ctx.session.session_id, ctx.session.to_state()
+        )
       result = RunResult(
         success=False,
         session=session,

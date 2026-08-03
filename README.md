@@ -15,6 +15,7 @@ A production-grade, type-safe Python agent framework with deterministic orchestr
 - **Lazy skills** — discover and register skills without bloating the system prompt; load full guidance on demand via the `load_skill` tool
 - **External capabilities** — delegate tool execution to a host/frontend (e.g. OpenCode) using `ExternalCapability` and `resume_external_tools()`
 - **Resilient execution** — structured error taxonomy (`TransientError`, `LogicError`, `SafetyError`, etc.) with configurable `RetryPolicy`
+- **Durable sessions** — versioned session checkpoints with a migration hook, mid-turn crash recovery that replays dangling tool calls on `resume()`, and sub-agent lineage records so a resumed parent continues an interrupted child session instead of starting over
 - **Observable hooks** — `Hooks` system for tracing, logging, and custom middleware
 - **Multi-backend LLM** — powered by `litellm`, supporting OpenAI, Anthropic, DeepSeek, and 100+ providers
 

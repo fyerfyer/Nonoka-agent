@@ -12,7 +12,7 @@ from nonoka.core.context import RunContext
 from nonoka.core.hooks import Hooks
 from nonoka.core.memory import MemoryRole
 from nonoka.core.runner import Runner
-from nonoka.core.session import Session
+from nonoka.core.session import Session, SessionStatus
 from nonoka.core.tool import tool
 from nonoka.core.types import RunResult
 
@@ -658,3 +658,85 @@ async def test_agent_tool_invoke_signature():
 
   result = await at.invoke(ctx, {"task": "test"})
   assert result is not None
+
+
+# --------------------------------------------------------------------------- #
+# 10. Child-session lineage
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.asyncio
+async def test_agent_tool_resumes_running_child_from_lineage():
+  """A running lineage record reuses the orphaned child session."""
+  runner = _make_mock_runner(response_content="resumed child answer")
+  child_agent = Agent(model="child", tools=[])
+  at = AgentTool(agent=child_agent)
+  parent = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+
+  # Simulate an orphaned child session checkpointed mid-run.
+  orphan = await runner._create_session(child_agent, deps=None)
+  await orphan.memory.add("previous turn marker", MemoryRole.USER)
+  orphan.status = SessionStatus.RUNNING
+  await runner.checkpoint_store.save_session(orphan.session_id, orphan.to_state())
+
+  prompt = "do something"
+  parent.extension_state["agent_tool_lineage"] = {
+    at._lineage_key(prompt): {
+      "child_session_id": orphan.session_id,
+      "status": "running",
+      "result_text": None,
+    }
+  }
+
+  result = await at.invoke(RunContext(parent), {"task": prompt})
+
+  assert result == "resumed child answer"
+  # The orphan session was reused: its pre-existing memory reached the LLM.
+  calls = runner.llm.chat.call_args_list
+  messages = calls[0].kwargs.get("messages") or calls[0][1].get("messages")
+  all_content = " ".join(str(m.content) for m in messages)
+  assert "previous turn marker" in all_content
+  # The lineage record still points at the same child and is now completed.
+  record = parent.extension_state["agent_tool_lineage"][at._lineage_key(prompt)]
+  assert record["child_session_id"] == orphan.session_id
+  assert record["status"] == "completed"
+  assert record["result_text"] == "resumed child answer"
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_returns_cached_result_for_completed_lineage():
+  """A completed lineage record returns the cached result without running."""
+  runner = _make_mock_runner()
+  at = AgentTool(agent=Agent(model="child", tools=[]))
+  parent = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+
+  prompt = "do something"
+  parent.extension_state["agent_tool_lineage"] = {
+    at._lineage_key(prompt): {
+      "child_session_id": "old-child",
+      "status": "completed",
+      "result_text": "cached result",
+    }
+  }
+
+  result = await at.invoke(RunContext(parent), {"task": prompt})
+
+  assert result == "cached result"
+  runner.llm.chat.assert_not_called()
+  assert at._lineage_key(prompt) not in parent.extension_state["agent_tool_lineage"]
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_records_lineage_for_new_child_session():
+  """Without a lineage record, a fresh child session runs and is recorded."""
+  runner = _make_mock_runner(response_content="fresh answer")
+  at = AgentTool(agent=Agent(model="child", tools=[]))
+  parent = await runner._create_session(Agent(model="parent", tools=[]), deps=None)
+
+  result = await at.invoke(RunContext(parent), {"task": "fresh task"})
+
+  assert result == "fresh answer"
+  runner.llm.chat.assert_called()
+  record = parent.extension_state["agent_tool_lineage"][at._lineage_key("fresh task")]
+  assert record["status"] == "completed"
+  assert record["result_text"] == "fresh answer"
+  assert record["child_session_id"] != parent.session_id

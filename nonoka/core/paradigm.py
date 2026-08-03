@@ -326,10 +326,13 @@ class ReActAgent:
             f"Max steps ({session.agent.max_steps}) exceeded for session {session.session_id}"
           )
 
+        # Persist the assistant tool_calls message before execution so a
+        # crash mid-turn leaves a checkpoint that resume() can repair.
+        await runner.checkpoint_store.save_session(session.session_id, session.to_state())
+
         tool_results = await self._execute_tool_calls(
           session, runner, response.tool_calls, max_concurrency,
         )
-
         # Check for fatal errors (HALT / FAIL) before adding to memory.
         # asyncio.gather(return_exceptions=True) swallows exceptions; we must
         # re-raise or translate them into a terminal RunResult here.
@@ -495,8 +498,90 @@ class ReActAgent:
       )
 
   async def resume(self, session: Session, runner: Any) -> RunResult:
-    """Resume a conversational session from checkpoint."""
+    """Resume a conversational session from checkpoint.
+
+    A checkpoint saved mid-turn may contain an assistant tool_calls message
+    without its tool results (the process crashed between the two).  Repair
+    that first by re-executing the dangling calls, then continue the loop.
+
+    Trade-off: replaying a call whose pre-crash execution did finish means
+    its side effects may be applied once more; git checkpoint/rollback is
+    the mitigation for workspace-mutating tools.
+    """
+    await self._replay_dangling_tool_calls(session, runner)
     return await self.run(session, runner, prompt="")
+
+  async def _replay_dangling_tool_calls(self, session: Session, runner: Any) -> None:
+    """Re-execute tool calls left without results by a mid-turn crash."""
+    if session.memory is None:
+      return
+
+    # Find the last assistant message carrying tool_calls (same scan as
+    # resume_approval) and keep only calls with no TOOL result after it.
+    assistant_index: int | None = None
+    pending_tool_calls: list[dict[str, Any]] = []
+    for i in range(len(session.memory.entries) - 1, -1, -1):
+      entry = session.memory.entries[i]
+      if entry.role == MemoryRole.ASSISTANT and entry.metadata.get("tool_calls"):
+        assistant_index = i
+        pending_tool_calls = list(entry.metadata["tool_calls"])
+        break
+
+    if assistant_index is None or not pending_tool_calls:
+      return
+
+    answered: set[str] = set()
+    for entry in session.memory.entries[assistant_index + 1:]:
+      if entry.role == MemoryRole.TOOL:
+        tc_id = entry.metadata.get("tool_call_id")
+        if tc_id:
+          answered.add(str(tc_id))
+
+    dangling = [
+      tc for tc in pending_tool_calls
+      if str(tc.get("id") or tc.get("tool_call_id", "unknown")) not in answered
+    ]
+    if not dangling:
+      return
+
+    max_concurrency = (
+      self.max_concurrency
+      if self.max_concurrency is not None
+      else session.agent.max_concurrency
+    )
+    tool_results = await self._execute_tool_calls(
+      session, runner, dangling, max_concurrency,
+    )
+
+    # Mirror run(): only HALT / FAIL / cancellation terminate the loop; other
+    # errors are written back as observations so the model can self-correct.
+    for tr in tool_results:
+      if isinstance(tr, (SafetyError, ToolFatalError, asyncio.CancelledError)):
+        raise tr
+
+    # Write results in the same format as a normal turn (see run()).
+    for tc, tr in zip(dangling, tool_results):
+      tc_id = tc.get("id") or tc.get("tool_call_id", "unknown")
+      func_name = tc.get("function", {}).get("name", "")
+      if isinstance(tr, Exception):
+        obs_text = f"Error: {type(tr).__name__}: {tr}"
+      else:
+        obs_text = json.dumps(tr, ensure_ascii=False, default=str) if not isinstance(tr, str) else tr
+
+      response_metadata = tr.get("metadata", {}) if isinstance(tr, dict) else {}
+      await session.memory.add(
+        obs_text,
+        MemoryRole.TOOL,
+        defer_budget=True,
+        tool_call_id=tc_id,
+        tool_name=func_name,
+        context_protected=bool(response_metadata.get("context_protected")),
+        skill_name=response_metadata.get("skill_name"),
+        skill_directory=response_metadata.get("skill_directory"),
+      )
+
+    await session.enforce_context_budget()
+    await runner.checkpoint_store.save_session(session.session_id, session.to_state())
 
   async def resume_approval(
     self,

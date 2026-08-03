@@ -54,6 +54,11 @@ class StepFailure(BaseModel):
   traceback: str | None = None
 
 
+# Current SessionState schema version.  Bump when the persisted shape changes
+# and register a migration step in ``_SESSION_STATE_MIGRATIONS``.
+SESSION_STATE_SCHEMA_VERSION = 1
+
+
 class SessionState(BaseModel):
   """
   Immutable snapshot of a Session.
@@ -61,6 +66,7 @@ class SessionState(BaseModel):
   This is a pure data object used to save to a database or deserialise
   from a database to restore a session.
   """
+  schema_version: int = SESSION_STATE_SCHEMA_VERSION
   session_id: str
   status: SessionStatus
 
@@ -84,6 +90,39 @@ class SessionState(BaseModel):
   # in the checkpoint prevents external-tool pause/resume boundaries from
   # resetting progress detectors and bounded repair counters.
   extension_state: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+# Migration chain: step N upgrades a payload from version N to N + 1.
+# Checkpoints written before schema versioning have no ``schema_version``
+# field and are treated as version 1.
+_SESSION_STATE_MIGRATIONS: dict[int, Any] = {}
+
+
+def migrate_session_state_dict(data: dict[str, Any]) -> dict[str, Any]:
+  """Upgrade a raw checkpoint payload to the current SessionState schema.
+
+  Payloads at the current version are returned unchanged; older payloads are
+  walked up the migration chain.  A payload written by a newer framework
+  version raises ``ValueError`` — silently loading it could drop fields.
+  """
+  version = data.get("schema_version", 1)
+  if version > SESSION_STATE_SCHEMA_VERSION:
+    raise ValueError(
+      f"Session checkpoint has schema_version {version}, but this framework "
+      f"supports up to version {SESSION_STATE_SCHEMA_VERSION}. "
+      "The checkpoint was written by a newer version of nonoka; "
+      "upgrade the framework to load it."
+    )
+  while version < SESSION_STATE_SCHEMA_VERSION:
+    migrate = _SESSION_STATE_MIGRATIONS.get(version)
+    if migrate is None:
+      raise ValueError(
+        f"No migration path from session schema_version {version} to "
+        f"{SESSION_STATE_SCHEMA_VERSION}."
+      )
+    data = migrate(data)
+    version = data.get("schema_version", version + 1)
+  return data
 
 
 class Session:
