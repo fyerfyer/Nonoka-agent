@@ -256,6 +256,14 @@ gateway.set_default_agent(agent)
 await gateway.start()
 ```
 
+> **Status**: this layer is a protocol-based integration point rather than a
+> fully productized feature. Only the `GatewayAdapter` contract ships today;
+> concrete adapters such as `TelegramAdapter` are illustrative and must be
+> implemented by the application. Adapter hot-reload via `PluginManager` and
+> gateway-level session/checkpoint behavior are not implemented yet — treat
+> this as an early-stage extension whose scope is still under review.
+
+
 ## Configuration
 
 Nonoka supports three ways to configure agents: **declarative files** (YAML/JSON/TOML), **fluent builders**, and **direct code**.

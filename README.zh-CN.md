@@ -250,6 +250,9 @@ gateway.set_default_agent(agent)
 await gateway.start()
 ```
 
+> **状态**：该层目前是基于协议的薄集成点，而非完整的产品化功能。框架当前只提供 `GatewayAdapter` 契约；具体适配器（如示例中的 `TelegramAdapter`）仅为示意，需要应用自行实现。基于 `PluginManager` 的适配器热加载、以及 gateway 层的 session/checkpoint 交互均尚未实现——请将其视为早期扩展，其范围仍在评估中。
+
+
 ## 配置
 
 Nonoka 支持三种配置 agent 的方式：**声明式文件**（YAML/JSON/TOML）、**流式构建器**和**直接写代码**。
